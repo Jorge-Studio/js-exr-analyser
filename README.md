@@ -176,16 +176,12 @@ Usually harmless; the app should still run.
 ## Project structure
 
 ```
-exr_analyzer_6Feb/
 ├── exr_analyzer.py    # Main application
-├── requirements.txt   # Python dependencies
+├── requirements.txt  # Python dependencies
 ├── run_windows.bat    # Windows launcher
 ├── run_mac.command    # macOS launcher
 ├── run_linux.sh       # Linux launcher
-├── README.md          # This file
-├── USER_CONTROLS.md   # Detailed GUI reference
-├── UI_IMPROVEMENT_GUIDE.md
-└── WAVEFORM_LAG_ANALYSIS.md
+└── README.md          # This file
 ```
 
 ---
