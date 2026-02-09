@@ -53,7 +53,15 @@ set EXIT_CODE=%errorlevel%
 REM If app exited with error, keep window open so user can read the message
 if not %EXIT_CODE%==0 (
     echo.
-    echo The application exited with an error. See message above.
+    echo ============================================
+    echo   EXR Analyzer exited with error code %EXIT_CODE%
+    echo ============================================
+    echo.
+    echo If a popup appeared, check that message.
+    echo A full error log may have been saved to: exr_analyzer_crash.log
+    echo.
+    echo Run "pip install -r requirements.txt" in this folder if dependencies failed.
+    echo.
     pause
 )
 

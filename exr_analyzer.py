@@ -10,6 +10,20 @@ Usage:
 import sys
 import os
 import subprocess
+import traceback
+
+# Version (single source of truth: VERSION file)
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+def _get_version():
+    vpath = os.path.join(_ROOT, "VERSION")
+    if os.path.isfile(vpath):
+        try:
+            with open(vpath, encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception:
+            pass
+    return "0.0.0"
+__version__ = _get_version()
 
 # Python version check (required 3.8+)
 def _show_error_win(msg, title="EXR Analyzer - Error"):
@@ -17,11 +31,40 @@ def _show_error_win(msg, title="EXR Analyzer - Error"):
     if sys.platform == "win32":
         try:
             import ctypes
+            # Write crash log so user can send it even if message box is truncated
+            try:
+                log_path = os.path.join(_ROOT, "exr_analyzer_crash.log")
+                with open(log_path, "w", encoding="utf-8") as f:
+                    f.write(title + "\n\n" + msg)
+            except Exception:
+                pass
             ctypes.windll.user32.MessageBoxW(0, msg, title, 0x10)
             return
-        except Exception:
-            pass
     print(title + "\n" + msg)
+
+
+def _windows_excepthook(exc_type, exc_value, exc_tb):
+    """On Windows, show any uncaught exception in a message box so the app doesn't close silently."""
+    if sys.platform != "win32":
+        return
+    msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    try:
+        log_path = os.path.join(_ROOT, "exr_analyzer_crash.log")
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(msg)
+    except Exception:
+        pass
+    _show_error_win(
+        "An unexpected error occurred:\n\n" + msg[:2000] + ("\n\n... (see exr_analyzer_crash.log for full trace)" if len(msg) > 2000 else ""),
+        "EXR Analyzer - Error",
+    )
+    # Call default to still print to stderr if there is a console
+    if hasattr(sys, "__excepthook__") and sys.__excepthook__ is not _windows_excepthook:
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
+if sys.platform == "win32":
+    sys.excepthook = _windows_excepthook
 
 if sys.version_info < (3, 8):
     _show_error_win(
@@ -1104,7 +1147,7 @@ class VisualizationPanel(QWidget):
 class EXRViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("EXR Analyzer — Cinema VFX Diagnostic Tool")
+        self.setWindowTitle(f"EXR Analyzer — Cinema VFX Diagnostic Tool  v{__version__}")
         self.setMinimumSize(1400, 900)
         self.setStyleSheet(STYLESHEET)
         
@@ -1369,12 +1412,16 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception as e:
+    except SystemExit:
+        raise
+    except BaseException as e:
+        tb = traceback.format_exc()
         _show_error_win(
-            "EXR Analyzer failed to start:\n\n" + str(e) + "\n\n"
+            "EXR Analyzer failed to start:\n\n" + tb + "\n\n"
             "Please ensure all requirements are installed:\n"
             "  pip install -r requirements.txt\n\n"
-            "If the problem continues, run from a terminal to see the full error.",
+            "On Windows, use run_windows.bat to keep the window open. "
+            "Full error is also saved to exr_analyzer_crash.log",
             "EXR Analyzer - Error",
         )
         sys.exit(1)

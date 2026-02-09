@@ -132,9 +132,11 @@ python exr_analyzer.py /path/to/your/file.exr
 
 ### Windows: app opens and closes immediately
 
-- Run **`run_windows.bat`** from a folder that contains `exr_analyzer.py` and `requirements.txt`.
+- **Always start the app with `run_windows.bat`** (double‑click the batch file). Do not double‑click `exr_analyzer.py` — that can close the window before you see any error.
+- Run **`run_windows.bat`** from the folder that contains `exr_analyzer.py` and `requirements.txt`. If the app crashes, the batch window will stay open and show the error code; an error popup may also appear.
+- If a crash occurs, check **`exr_analyzer_crash.log`** in the same folder for the full error and traceback.
 - If an error box appears, follow the message (e.g. run `pip install -r requirements.txt` in the same folder, with the same Python).
-- Ensure **Python 3.8+** is installed and “Add Python to PATH” was checked. Install from [python.org](https://www.python.org/downloads/).
+- Ensure **Python 3.8+** is installed and **“Add Python to PATH”** was checked. Install from [python.org](https://www.python.org/downloads/).
 
 ### "OpenEXR not found" or other missing module
 
@@ -178,11 +180,17 @@ Usually harmless; the app should still run.
 ```
 ├── exr_analyzer.py    # Main application
 ├── requirements.txt  # Python dependencies
+├── VERSION            # Single source of truth for version (e.g. 1.0.0)
 ├── run_windows.bat    # Windows launcher
 ├── run_mac.command    # macOS launcher
 ├── run_linux.sh       # Linux launcher
 └── README.md          # This file
 ```
+
+## Versioning
+
+- The app version is read from the **`VERSION`** file (e.g. `1.0.0`) and shown in the window title.
+- To release a new version: update `VERSION`, commit, and tag (e.g. `git tag v1.0.0`).
 
 ---
 
