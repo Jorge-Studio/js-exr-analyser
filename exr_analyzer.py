@@ -1663,7 +1663,12 @@ class LUTPanel(QWidget):
         layout = QVBoxLayout(self)
         grp = QGroupBox("LUT (.cube)")
         grp.setStyleSheet("QGroupBox { font-weight: 600; }")
+        self._lut_grp = grp
         gl = QVBoxLayout(grp)
+        self.enable_cb = QCheckBox("Enable LUT")
+        self.enable_cb.setChecked(True)
+        self.enable_cb.toggled.connect(self._on_enable_toggled)
+        gl.addWidget(self.enable_cb)
         row = QHBoxLayout()
         self.folder_btn = QPushButton("LUT folder…")
         self.folder_btn.clicked.connect(self._pick_folder)
@@ -1678,7 +1683,7 @@ class LUTPanel(QWidget):
         self.lut_a_combo.currentIndexChanged.connect(self._emit)
         gl.addWidget(self.lut_a_combo)
         strength_row = QHBoxLayout()
-        strength_row.addWidget(QLabel("Strength"))
+        strength_row.addWidget(QLabel("Strength A"))
         self.strength_slider = QSlider(Qt.Horizontal)
         self.strength_slider.setRange(0, 1000)
         self.strength_slider.setValue(1000)
@@ -1707,6 +1712,26 @@ class LUTPanel(QWidget):
         gl.addWidget(self.lut_b_combo)
         self.lut_b_combo.setVisible(False)
         self._lut_b_label.setVisible(False)
+        self._strength_b_label = QLabel("Strength B")
+        gl.addWidget(self._strength_b_label)
+        strength_b_row = QHBoxLayout()
+        self.strength_b_slider = QSlider(Qt.Horizontal)
+        self.strength_b_slider.setRange(0, 1000)
+        self.strength_b_slider.setValue(1000)
+        self.strength_b_slider.valueChanged.connect(self._sync_strength_b_to_spin)
+        strength_b_row.addWidget(self.strength_b_slider, stretch=1)
+        self.strength_b_spin = QDoubleSpinBox()
+        self.strength_b_spin.setRange(0.0, 1.0)
+        self.strength_b_spin.setValue(1.0)
+        self.strength_b_spin.setDecimals(2)
+        self.strength_b_spin.setSingleStep(0.05)
+        self.strength_b_spin.setMinimumWidth(52)
+        self.strength_b_spin.valueChanged.connect(self._sync_strength_b_to_slider)
+        strength_b_row.addWidget(self.strength_b_spin)
+        gl.addLayout(strength_b_row)
+        self._strength_b_label.setVisible(False)
+        self.strength_b_slider.setVisible(False)
+        self.strength_b_spin.setVisible(False)
         self.assume_cb = QCheckBox("Alternate .cube order (if colors wrong)")
         self.assume_cb.setChecked(False)
         self.assume_cb.toggled.connect(self._on_assume)
@@ -1775,7 +1800,36 @@ class LUTPanel(QWidget):
         is_ab = self.compare_combo.currentData() == "a_vs_b"
         self.lut_b_combo.setVisible(is_ab)
         self._lut_b_label.setVisible(is_ab)
+        self._strength_b_label.setVisible(is_ab)
+        self.strength_b_slider.setVisible(is_ab)
+        self.strength_b_spin.setVisible(is_ab)
         self.lut_changed.emit()
+
+    def _on_enable_toggled(self, checked):
+        enabled = checked
+        self.folder_btn.setEnabled(enabled)
+        self.path_label.setEnabled(enabled)
+        self.lut_a_combo.setEnabled(enabled)
+        self.strength_slider.setEnabled(enabled)
+        self.strength_spin.setEnabled(enabled)
+        self.compare_combo.setEnabled(enabled)
+        self._lut_b_label.setEnabled(enabled)
+        self.lut_b_combo.setEnabled(enabled)
+        self._strength_b_label.setEnabled(enabled)
+        self.strength_b_slider.setEnabled(enabled)
+        self.strength_b_spin.setEnabled(enabled)
+        self.assume_cb.setEnabled(enabled)
+        self.lut_changed.emit()
+
+    def _sync_strength_b_to_spin(self):
+        self.strength_b_spin.setValue(self.strength_b_slider.value() / 1000.0)
+        self._emit()
+
+    def _sync_strength_b_to_slider(self):
+        self.strength_b_slider.blockSignals(True)
+        self.strength_b_slider.setValue(int(self.strength_b_spin.value() * 1000))
+        self.strength_b_slider.blockSignals(False)
+        self._emit()
 
     def _on_assume(self, checked):
         self._assume_bgr = not checked
@@ -1803,13 +1857,19 @@ class LUTPanel(QWidget):
     def get_strength_a(self):
         return self.strength_spin.value()
 
+    def get_strength_b(self):
+        return self.strength_b_spin.value()
+
+    def is_enabled(self):
+        return self.enable_cb.isChecked()
+
     def get_lut_a_path(self):
-        if self.lut_a_combo.count() == 0:
+        if not self.is_enabled() or self.lut_a_combo.count() == 0:
             return None
         return self.lut_a_combo.currentData()
 
     def get_lut_b_path(self):
-        if self.compare_combo.currentData() != "a_vs_b" or self.lut_b_combo.count() == 0:
+        if not self.is_enabled() or self.compare_combo.currentData() != "a_vs_b" or self.lut_b_combo.count() == 0:
             return None
         return self.lut_b_combo.currentData()
 
@@ -1843,12 +1903,14 @@ class LUTPanel(QWidget):
         if lut is None:
             return rgb_float
         size, dmin, dmax, table = lut
-        return apply_lut_float(rgb_float, table, dmin, dmax, strength=self.get_strength_a())
+        return apply_lut_float(rgb_float, table, dmin, dmax, strength=self.get_strength_b())
 
     def get_left_right_for_compare(self, graded_rgb):
         """Return (img_left, img_right, label_left, label_right) for current compare mode."""
+        if not self.is_enabled() or graded_rgb is None:
+            return None, None, "", ""
         mode = self.get_compare_mode()
-        if mode == "off" or graded_rgb is None:
+        if mode == "off":
             return None, None, "", ""
         if mode == "original_vs_a":
             right = self.apply_lut_a(graded_rgb)
@@ -1856,7 +1918,7 @@ class LUTPanel(QWidget):
         if mode == "a_vs_b":
             left = self.apply_lut_a(graded_rgb)
             right = self.apply_lut_b(graded_rgb)
-            return left, right, self.lut_a_combo.currentText(), self.lut_b_combo.currentText()
+            return left, right, (self.lut_a_combo.currentText() + f" ({self.get_strength_a():.2f})"), (self.lut_b_combo.currentText() + f" ({self.get_strength_b():.2f})")
         return None, None, "", ""
 
 
@@ -2450,7 +2512,6 @@ class EXRViewer(QMainWindow):
         
         self.current_info = None
         self.compare_info = None
-        self._grading = {}
 
         self._setup_ui()
     
@@ -2510,13 +2571,9 @@ class EXRViewer(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(12)
         
-        # Bento split: Image (or LUT compare) 50%, Waveform 25%, Histogram 25%
-        self.analyzer_preview_stack = QStackedWidget()
+        # Bento split: Image 50%, Waveform 25%, Histogram 25%
         self.image_panel = VisualizationPanel("Image Preview", ImagePreviewWidget, self)
-        self.analyzer_preview_stack.addWidget(self.image_panel)
-        self.analyzer_compare_widget = SplitComparisonWidget(self)
-        self.analyzer_preview_stack.addWidget(self.analyzer_compare_widget)
-        left_layout.addWidget(self.analyzer_preview_stack, stretch=2)
+        left_layout.addWidget(self.image_panel, stretch=2)
         
         self.waveform_panel = VisualizationPanel("Waveform", WaveformWidget, self)
         left_layout.addWidget(self.waveform_panel, stretch=1)
@@ -2526,19 +2583,11 @@ class EXRViewer(QMainWindow):
         
         splitter.addWidget(left_panel)
         
-        # Right side: Grading + Stats
+        # Right side: Stats only (no grading/LUT in Analyzer)
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(12)
-        
-        self.grading_panel = GradingPanel(self)
-        self.grading_panel.grading_changed.connect(self._on_analyzer_grading_changed)
-        right_layout.addWidget(self.grading_panel)
-        self.analyzer_lut_panel = LUTPanel(self)
-        self.analyzer_lut_panel.lut_changed.connect(self._on_analyzer_lut_changed)
-        right_layout.addWidget(self.analyzer_lut_panel)
-        self._grading = self.grading_panel.get_grading()
         
         # File info
         file_group = QGroupBox("FILE INFO")
@@ -2696,43 +2745,10 @@ class EXRViewer(QMainWindow):
                 self.channel_table.setItem(i, 3, QTableWidgetItem(f"{r['mean']:.4f}"))
                 self.channel_table.setItem(i, 4, QTableWidgetItem(f"{r['unique_count']}"))
         
-        # Update visualizations (with grading applied)
-        img = apply_grading(info['img_data'], **self._grading)
-        self._update_analyzer_preview(img)
-        self.waveform_panel.update_data(img)
-        info_graded = {**info, 'img_data': img}
-        self.histogram_panel.update_data(info_graded)
-
-    def _update_analyzer_preview(self, graded_img):
-        """Show single image or LUT comparison in Analyzer tab."""
-        if graded_img is None:
-            self.analyzer_preview_stack.setCurrentIndex(0)
-            self.image_panel.update_data(img_data=None, exposure=0.0)
-            return
-        mode = self.analyzer_lut_panel.get_compare_mode()
-        if mode != "off":
-            left, right, lbl_left, lbl_right = self.analyzer_lut_panel.get_left_right_for_compare(graded_img)
-            self.analyzer_preview_stack.setCurrentIndex(1)
-            self.analyzer_compare_widget.update_comparison(left, right, lbl_left, lbl_right)
-        else:
-            self.analyzer_preview_stack.setCurrentIndex(0)
-            display = self.analyzer_lut_panel.apply_lut_a(graded_img) if self.analyzer_lut_panel.get_lut_a_path() else graded_img
-            self.image_panel.update_data(img_data=display, exposure=0.0)
-
-    def _on_analyzer_grading_changed(self):
-        self._grading = self.grading_panel.get_grading()
-        if not self.current_info:
-            return
-        img = apply_grading(self.current_info['img_data'], **self._grading)
-        self._update_analyzer_preview(img)
-        self.waveform_panel.update_data(img)
-        self.histogram_panel.update_data({**self.current_info, 'img_data': img})
-
-    def _on_analyzer_lut_changed(self):
-        if not self.current_info:
-            return
-        img = apply_grading(self.current_info['img_data'], **self._grading)
-        self._update_analyzer_preview(img)
+        # Update visualizations (raw image, no grading/LUT in Analyzer)
+        self.image_panel.update_data(info['img_data'])
+        self.waveform_panel.update_data(info['img_data'])
+        self.histogram_panel.update_data(info)
     
     def update_comparison(self):
         if not self.current_info or not self.compare_info:
@@ -2793,8 +2809,6 @@ class EXRViewer(QMainWindow):
         fd, temp_exr = tempfile.mkstemp(suffix=".exr")
         os.close(fd)
         img = self.current_info["img_data"]
-        if hasattr(self, "_grading") and self._grading:
-            img = apply_grading(img, **self._grading)
         if not write_exr_frame(temp_exr, img):
             try:
                 os.unlink(temp_exr)
