@@ -77,9 +77,22 @@ if sys.version_info < (3, 8):
     )
     sys.exit(1)
 
-# Install all requirements from requirements.txt before any other imports
+# Install requirements; on Windows try core-only first so numpy etc. install even if OpenEXR fails
 def _install_requirements():
     root = os.path.dirname(os.path.abspath(__file__))
+    if sys.platform == "win32":
+        core_file = os.path.join(root, "requirements-core.txt")
+        if os.path.isfile(core_file):
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-q", "-r", core_file],
+                    cwd=root,
+                    check=False,
+                    timeout=180,
+                    capture_output=True,
+                )
+            except Exception:
+                pass
     req_file = os.path.join(root, "requirements.txt")
     if not os.path.isfile(req_file):
         return True
@@ -88,7 +101,7 @@ def _install_requirements():
             [sys.executable, "-m", "pip", "install", "-q", "-r", req_file],
             cwd=root,
             check=False,
-            timeout=120,
+            timeout=180,
             capture_output=True,
         )
     except Exception:

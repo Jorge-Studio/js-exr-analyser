@@ -31,15 +31,24 @@ if not exist "venv" (
 REM Activate virtual environment
 call venv\Scripts\activate.bat
 
-REM Install/update all dependencies (required versions from requirements.txt)
-echo Installing dependencies...
-pip install --upgrade pip -q
-pip install -r requirements.txt
+REM Install core dependencies first (no build step; works on restricted networks)
+echo Installing core dependencies (numpy, PyQt5, OpenCV, etc.)...
+pip install -q -r requirements-core.txt
 if errorlevel 1 (
     echo.
-    echo WARNING: Some dependencies may have failed. Check your internet connection.
-    echo Trying to start the app anyway...
+    echo Core install failed. See OFFLINE INSTALL in README if you have network restrictions.
     echo.
+) else (
+    echo Core dependencies OK.
+)
+
+REM Optional: install OpenEXR for full metadata (often fails on Windows without Visual Studio)
+echo Installing optional OpenEXR...
+pip install -q OpenEXR>=3.0.0 2>nul
+if errorlevel 1 (
+    echo OpenEXR skipped or failed - app will use OpenCV for EXR. This is OK.
+) else (
+    echo OpenEXR installed.
 )
 
 echo.
@@ -60,7 +69,7 @@ if not %EXIT_CODE%==0 (
     echo If a popup appeared, check that message.
     echo A full error log may have been saved to: exr_analyzer_crash.log
     echo.
-    echo Run "pip install -r requirements.txt" in this folder if dependencies failed.
+    echo Run "pip install -r requirements-core.txt" in this folder, or see README "Offline install".
     echo.
     pause
 )

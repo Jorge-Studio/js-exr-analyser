@@ -34,7 +34,7 @@ A professional GUI application for analyzing EXR files, measuring bit depth qual
 
 ## Requirements
 
-- **Python 3.8+**
+- **Python 3.8+** (3.11 or 3.12 recommended on Windows for best package compatibility)
 - **pip**
 
 On **Windows**, the app uses **OpenCV** to read EXR files (no Visual Studio / CMake needed). On macOS and Linux it uses the **OpenEXR** library when available for full metadata (colorspace, compression); if OpenEXR is not installed, OpenCV is used there too.
@@ -174,18 +174,62 @@ sudo dnf install python3-qt5 openexr-devel
 
 Usually harmless; the app should still run.
 
+### "No module named 'numpy'" or install fails on Windows
+
+- Use **Python 3.11 or 3.12** if possible (3.14 is very new; some packages may not have wheels yet). Install from [python.org](https://www.python.org/downloads/).
+- Run **`run_windows.bat`** again — it installs **core** dependencies first (numpy, PyQt5, OpenCV, etc.) so the app can start even if OpenEXR fails.
+- If install still fails, see **Network restrictions** and **Offline install** below.
+
+---
+
+## Network restrictions (corporate / locked-down PCs)
+
+If your network blocks or restricts downloads, ask IT to allow the following so `pip` can install dependencies:
+
+| What to request | Why |
+|-----------------|-----|
+| **Outbound HTTPS** to `pypi.org` and `files.pythonhosted.org` | Pip downloads packages from these. |
+| **No SSL interception** for the above (or install corporate root cert in the machine trust store) | Pip uses HTTPS; broken or inspected SSL can cause install failures. |
+| **Allow running** `python.exe` and `pip` from the project folder (or from `venv\Scripts`) | The launcher and app run Python. |
+| **Proxy** | If you use a proxy, set `HTTP_PROXY` and `HTTPS_PROXY` (e.g. `http://proxy.company:8080`) before running the batch file, or ask IT to configure system proxy. |
+
+**Circumvent without changing policy:** use the **Offline install** below (prepare the bundle on a machine that has internet, then copy to the restricted PC).
+
+---
+
+## Offline install (no internet on the target PC)
+
+Use this when the target PC cannot download packages (no internet or blocked).
+
+1. **On a computer that has internet** (same OS and Python version as target, e.g. Windows + Python 3.12):
+   - Open a command prompt in the project folder.
+   - Create and use a venv if you like: `python -m venv venv` then `venv\Scripts\activate`.
+   - Run: **`prepare_offline_windows.bat`** (or manually: `pip download -r requirements-core.txt -d wheels`).
+   - This creates a **`wheels`** folder with all needed packages.
+
+2. **Copy to the restricted PC:**
+   - Copy the whole project folder (including the **`wheels`** folder and `requirements-core.txt`).
+
+3. **On the restricted PC:**
+   - Create venv: `python -m venv venv`, then `venv\Scripts\activate`.
+   - Install from the local wheels (no network):  
+     **`pip install --no-index --find-links=wheels -r requirements-core.txt`**
+   - Run the app: **`run_windows.bat`** or `python exr_analyzer.py`.
+
 ---
 
 ## Project structure
 
 ```
-├── exr_analyzer.py    # Main application
-├── requirements.txt  # Python dependencies
-├── VERSION            # Single source of truth for version (e.g. 1.0.0)
-├── run_windows.bat    # Windows launcher
-├── run_mac.command    # macOS launcher
-├── run_linux.sh       # Linux launcher
-└── README.md          # This file
+├── exr_analyzer.py       # Main application
+├── requirements.txt      # Full Python dependencies (includes optional OpenEXR)
+├── requirements-core.txt # Core only (Windows-friendly; no build step)
+├── VERSION               # Single source of truth for version (e.g. 1.0.0)
+├── run_windows.bat       # Windows launcher
+├── run_mac.command       # macOS launcher
+├── run_linux.sh          # Linux launcher
+├── prepare_offline_windows.bat  # Create wheels/ for offline install
+└── README.md             # This file
 ```
 
 ## Versioning

@@ -1,0 +1,9 @@
+# Core dependencies only (all have pre-built wheels on Windows).
+# Use this when full requirements.txt fails (e.g. OpenEXR build, or network restrictions).
+# The app works with these alone on Windows (uses OpenCV for EXR).
+PyQt5>=5.15.0
+numpy>=1.20.0
+matplotlib>=3.5.0
+Pillow>=9.0.0
+pyqtgraph>=0.13.0
+opencv-python-headless>=4.5.0
