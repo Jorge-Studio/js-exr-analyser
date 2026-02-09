@@ -37,6 +37,8 @@ A professional GUI application for analyzing EXR files, measuring bit depth qual
 - **Python 3.8+**
 - **pip**
 
+On **Windows**, the app uses **OpenCV** to read EXR files (no Visual Studio / CMake needed). On macOS and Linux it uses the **OpenEXR** library when available for full metadata (colorspace, compression); if OpenEXR is not installed, OpenCV is used there too.
+
 ---
 
 ## Installation
@@ -140,16 +142,15 @@ python exr_analyzer.py /path/to/your/file.exr
 
 ### "OpenEXR not found" or other missing module
 
+On **Windows**, you can ignore OpenEXR errors: the app will use OpenCV to read EXR files. Just run **`run_windows.bat`** again; the app should start.
+
+On macOS/Linux, install dependencies:
+
 ```cmd
 pip install -r requirements.txt
 ```
 
-If OpenEXR still fails, try:
-
-```cmd
-pip install --upgrade pip
-pip install OpenEXR
-```
+If OpenEXR still fails (e.g. missing system libs) but you have OpenCV, the app will still run and use OpenCV for EXR.
 
 ### macOS: "No module named PyQt5"
 

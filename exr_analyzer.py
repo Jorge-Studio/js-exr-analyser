@@ -40,6 +40,8 @@ def _show_error_win(msg, title="EXR Analyzer - Error"):
                 pass
             ctypes.windll.user32.MessageBoxW(0, msg, title, 0x10)
             return
+        except Exception:
+            pass
     print(title + "\n" + msg)
 
 
@@ -108,8 +110,14 @@ try:
     from PyQt5.QtCore import Qt, QSize, pyqtSignal
     from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QFont, QPen, QCursor
     import pyqtgraph as pg
-    import OpenEXR
-    import Imath
+    USE_OPENEXR = False
+    try:
+        import OpenEXR
+        import Imath
+        USE_OPENEXR = True
+    except ImportError:
+        os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+        import cv2
     import matplotlib
     matplotlib.use('Qt5Agg')
     from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -334,8 +342,100 @@ def detect_encoding(mean_vals, max_vals):
     return "Unknown"
 
 
+def _analyze_exr_cv2(filepath):
+    """Analyze EXR using OpenCV (fallback when OpenEXR is not installed, e.g. on Windows)."""
+    img = cv2.imread(filepath, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
+    if img is None:
+        raise RuntimeError("Could not read EXR with OpenCV. The file may be invalid or OpenCV was built without EXR support.")
+    if img.dtype != np.float32 and img.dtype != np.float64:
+        img = img.astype(np.float32) / (np.iinfo(img.dtype).max if img.dtype.kind in "ui" else 1.0)
+    else:
+        img = img.astype(np.float32)
+    height, width = img.shape[:2]
+    if img.ndim == 2:
+        img = np.stack([img, img, img], axis=-1)
+    elif img.shape[2] == 1:
+        img = np.repeat(img, 3, axis=2)
+    elif img.shape[2] >= 3:
+        img = img[:, :, :3].copy()
+    img = np.ascontiguousarray(img[:, :, ::-1], dtype=np.float32)
+    rgb_channels = ['R', 'G', 'B']
+    fsize = os.path.getsize(filepath)
+    results = {}
+    means, maxes = [], []
+    for i, ch in enumerate(rgb_channels):
+        arr = img[:, :, i].flatten()
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            finite = np.array([0.0], dtype=np.float32)
+        unique = np.unique(finite)
+        midtone = unique[(unique > 0.2) & (unique < 0.5)]
+        if len(midtone) > 1:
+            diffs = np.diff(midtone.astype(np.float64))
+            step_ratio = (1.0 / 255) / diffs.mean() if diffs.mean() > 0 else 0
+        else:
+            step_ratio = 0
+        results[ch] = {
+            'unique_count': len(unique),
+            'bit_label': '32-bit float',
+            'ch_type': 'FLOAT',
+            'min': float(np.min(finite)),
+            'max': float(np.max(finite)),
+            'mean': float(np.mean(finite)),
+            'step_ratio': step_ratio,
+            'data': finite,
+        }
+        means.append(results[ch]['mean'])
+        maxes.append(results[ch]['max'])
+    encoding = detect_encoding(means, maxes)
+    unique_counts = [results[ch]['unique_count'] for ch in rgb_channels]
+    avg_unique = np.mean(unique_counts)
+    eff_bits = math.log2(avg_unique) if avg_unique > 1 else 0
+    all_vals = img.flatten()
+    above_1 = 100 * np.sum(all_vals > 1.0) / max(len(all_vals), 1)
+    if eff_bits >= 13.0:
+        rating = "★★★★★ Cinema-grade"
+    elif eff_bits >= 11.5:
+        rating = "★★★★☆ Good"
+    elif eff_bits >= 10.0:
+        rating = "★★★☆☆ Acceptable"
+    elif eff_bits >= 8.5:
+        rating = "★★☆☆☆ Poor"
+    else:
+        rating = "★☆☆☆☆ 8-bit equivalent"
+    avg_step_ratio = np.mean([results[ch]['step_ratio'] for ch in rgb_channels])
+    return {
+        'filepath': filepath,
+        'filename': os.path.basename(filepath),
+        'width': width,
+        'height': height,
+        'filesize': fsize,
+        'filesize_mb': fsize / 1024 / 1024,
+        'compression': 'Unknown (OpenCV)',
+        'native_type': '32-bit float',
+        'colorspace': 'Unknown (OpenCV)',
+        'encoding': encoding,
+        'eff_bits': eff_bits,
+        'avg_unique': avg_unique,
+        'above_1_pct': above_1,
+        'rating': rating,
+        'results': results,
+        'img_data': img,
+        'avg_step_ratio': avg_step_ratio,
+        'range_min': min(results[ch]['min'] for ch in rgb_channels),
+        'range_max': max(results[ch]['max'] for ch in rgb_channels),
+    }
+
+
 def analyze_exr(filepath):
-    """Analyze an EXR file and return all metrics."""
+    """Analyze an EXR file and return all metrics (uses OpenEXR or OpenCV fallback)."""
+    if USE_OPENEXR:
+        return _analyze_exr_openexr(filepath)
+    return _analyze_exr_cv2(filepath)
+
+
+def _analyze_exr_openexr(filepath):
+    """Analyze an EXR file using the OpenEXR library (full metadata)."""
     f = OpenEXR.InputFile(filepath)
     header = f.header()
     dw = header['dataWindow']
