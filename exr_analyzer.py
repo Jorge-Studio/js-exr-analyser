@@ -9,6 +9,7 @@ Usage:
 
 import sys
 import os
+import re
 import subprocess
 import traceback
 
@@ -118,9 +119,9 @@ try:
         QLabel, QPushButton, QFileDialog, QTableWidget, QTableWidgetItem,
         QSplitter, QFrame, QScrollArea, QGroupBox, QGridLayout, QComboBox,
         QProgressBar, QSizePolicy, QDialog, QToolBar, QSlider, QSpinBox,
-        QCheckBox,
+        QCheckBox, QTabWidget, QStackedWidget, QProgressDialog, QMessageBox, QDoubleSpinBox,
     )
-    from PyQt5.QtCore import Qt, QSize, pyqtSignal
+    from PyQt5.QtCore import Qt, QSize, pyqtSignal, QTimer, QThread
     from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QFont, QPen, QCursor
     import pyqtgraph as pg
     USE_OPENEXR = False
@@ -540,6 +541,416 @@ def _analyze_exr_openexr(filepath):
         'range_min': min(results[ch]['min'] for ch in rgb_channels),
         'range_max': max(results[ch]['max'] for ch in rgb_channels),
     }
+
+
+def write_exr_frame(filepath, img_data):
+    """Write RGB (H,W,3) or RGBA (H,W,4) float32 to an EXR file. Returns True on success."""
+    if img_data is None or img_data.size == 0:
+        return False
+    try:
+        h, w = img_data.shape[:2]
+        has_alpha = img_data.shape[2] == 4
+        if USE_OPENEXR:
+            header = OpenEXR.Header(w, h)
+            ch_dict = {
+                "R": Imath.Channel(Imath.PixelType(Imath.PixelType.FLOAT)),
+                "G": Imath.Channel(Imath.PixelType(Imath.PixelType.FLOAT)),
+                "B": Imath.Channel(Imath.PixelType(Imath.PixelType.FLOAT)),
+            }
+            if has_alpha:
+                ch_dict["A"] = Imath.Channel(Imath.PixelType(Imath.PixelType.FLOAT))
+            header["channels"] = ch_dict
+            out = OpenEXR.OutputFile(filepath, header)
+            pix = {"R": img_data[:, :, 0].astype(np.float32).tobytes(),
+                   "G": img_data[:, :, 1].astype(np.float32).tobytes(),
+                   "B": img_data[:, :, 2].astype(np.float32).tobytes()}
+            if has_alpha:
+                pix["A"] = img_data[:, :, 3].astype(np.float32).tobytes()
+            out.writePixels(pix)
+            out.close()
+            return True
+        else:
+            # OpenCV: BGR order, float32; no alpha write in OpenCV EXR path
+            bgr = np.ascontiguousarray(img_data[:, :, :3][:, :, ::-1].astype(np.float32))
+            return cv2.imwrite(filepath, bgr)
+    except Exception:
+        return False
+
+
+def load_exr_frame(filepath, return_alpha=False):
+    """Load a single EXR frame as RGB float32 (H,W,3) or RGBA (H,W,4) if return_alpha and A exists. Returns None on error."""
+    try:
+        if USE_OPENEXR:
+            f = OpenEXR.InputFile(filepath)
+            header = f.header()
+            dw = header['dataWindow']
+            w = dw.max.x - dw.min.x + 1
+            h = dw.max.y - dw.min.y + 1
+            channels = sorted(header['channels'].keys())
+            rgb = [ch for ch in ['R', 'G', 'B'] if ch in channels]
+            if not rgb:
+                rgb = channels[:3] if len(channels) >= 3 else channels
+            has_alpha = return_alpha and 'A' in header['channels']
+            nch = 4 if has_alpha else 3
+            img_data = np.zeros((h, w, nch), dtype=np.float32)
+            for i, ch in enumerate(rgb[:3]):
+                arr, _, _ = read_channel(f, header, ch)
+                img_data[:, :, i] = arr.reshape((h, w))
+            if has_alpha:
+                arr, _, _ = read_channel(f, header, 'A')
+                img_data[:, :, 3] = arr.reshape((h, w))
+            return img_data
+        else:
+            # OpenCV doesn't reliably expose EXR alpha; return RGB only
+            img = cv2.imread(filepath, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
+            if img is None:
+                return None
+            if img.dtype != np.float32 and img.dtype != np.float64:
+                img = img.astype(np.float32) / (np.iinfo(img.dtype).max if img.dtype.kind in "ui" else 1.0)
+            else:
+                img = img.astype(np.float32)
+            if img.ndim == 2:
+                img = np.stack([img, img, img], axis=-1)
+            elif img.shape[2] == 1:
+                img = np.repeat(img, 3, axis=2)
+            elif img.shape[2] >= 3:
+                img = img[:, :, :3].copy()
+            return np.ascontiguousarray(img[:, :, ::-1], dtype=np.float32)
+    except Exception:
+        return None
+
+
+def apply_grading(img, exposure=0.0, gamma=2.2, lift=0.0, gain=1.0, saturation=1.0, alpha_scale=1.0):
+    """
+    Apply color and alpha grading to linear float image (H,W,3) or (H,W,4).
+    Returns same shape. Order: exposure -> lift -> gain -> gamma (RGB) -> saturation (RGB) -> alpha scale (A).
+    """
+    if img is None or img.size == 0:
+        return img
+    img = np.clip(img.astype(np.float64), 0, None).astype(np.float32)
+    # Exposure
+    if exposure != 0.0:
+        mult = 2.0 ** float(exposure)
+        img = img * mult
+    # Lift (add to RGB)
+    if lift != 0.0:
+        img[:, :, :3] = img[:, :, :3] + float(lift)
+    # Gain (multiply RGB)
+    if gain != 1.0:
+        img[:, :, :3] = img[:, :, :3] * float(gain)
+    # Gamma (RGB only)
+    if gamma != 1.0 and gamma > 0:
+        img[:, :, :3] = np.power(np.clip(img[:, :, :3], 0, None), 1.0 / float(gamma))
+    # Saturation (RGB only): mix with luminance
+    if saturation != 1.0 and img.shape[2] >= 3:
+        lum = 0.2126 * img[:, :, 0] + 0.7152 * img[:, :, 1] + 0.0722 * img[:, :, 2]
+        for c in range(3):
+            img[:, :, c] = np.clip(lum + (img[:, :, c] - lum) * float(saturation), 0, None)
+    # Alpha scale
+    if img.shape[2] == 4 and alpha_scale != 1.0:
+        img[:, :, 3] = np.clip(img[:, :, 3] * float(alpha_scale), 0, 1)
+    return img.astype(np.float32)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# .CUBE LUT LOADING AND APPLICATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+CUBE_RE_FLOAT = re.compile(r"[-+]?\d*\.\d+|[-+]?\d+")
+
+
+def _parse_cube_floats(line):
+    return [float(x) for x in CUBE_RE_FLOAT.findall(line)]
+
+
+def load_cube_lut(path_or_bytes, assume_bgr_major=True):
+    """
+    Load a .cube 3D LUT file. path_or_bytes: file path (str) or file content (bytes).
+    Returns (size, domain_min, domain_max, table).
+    table shape (size, size, size, 3) RGB output; indexing table[b, g, r] for input (r,g,b).
+    """
+    if isinstance(path_or_bytes, (str, os.PathLike)):
+        with open(path_or_bytes, "rb") as f:
+            text = f.read().decode("utf-8", errors="ignore")
+    else:
+        text = path_or_bytes.decode("utf-8", errors="ignore")
+    lines = text.splitlines()
+    size = None
+    domain_min = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    domain_max = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+    data = []
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        u = line.upper()
+        if u.startswith("LUT_3D_SIZE"):
+            size = int(line.split()[-1])
+            continue
+        if u.startswith("DOMAIN_MIN"):
+            vals = _parse_cube_floats(line)
+            if len(vals) >= 3:
+                domain_min = np.array(vals[:3], dtype=np.float32)
+            continue
+        if u.startswith("DOMAIN_MAX"):
+            vals = _parse_cube_floats(line)
+            if len(vals) >= 3:
+                domain_max = np.array(vals[:3], dtype=np.float32)
+            continue
+        vals = _parse_cube_floats(line)
+        if len(vals) == 3:
+            data.append(vals)
+    if size is None:
+        raise ValueError("LUT_3D_SIZE not found in .cube file.")
+    expected = size * size * size
+    if len(data) < expected:
+        raise ValueError(f".cube incomplete: got {len(data)} rows, expected {expected}.")
+    data = np.asarray(data[:expected], dtype=np.float32)
+    table = data.reshape((size, size, size, 3))
+    if not assume_bgr_major:
+        table = table.transpose(2, 1, 0, 3)
+    return size, domain_min, domain_max, table
+
+
+def apply_lut_float(rgb_float, lut_table, domain_min, domain_max, strength=1.0):
+    """
+    Apply 3D LUT to float RGB (H,W,3) in [0,∞). LUT is (size, size, size, 3).
+    domain_min/domain_max (3,) map input to 0..1 for lookup. strength 0=no LUT, 1=full LUT.
+    Returns float RGB same shape.
+    """
+    if rgb_float is None or rgb_float.size == 0 or lut_table is None:
+        return rgb_float
+    img = np.clip(rgb_float.astype(np.float64), 0, None)
+    h, w = img.shape[:2]
+    dom_min = np.array(domain_min).reshape(1, 1, 3)
+    dom_max = np.array(domain_max).reshape(1, 1, 3)
+    denom = np.maximum(dom_max - dom_min, 1e-8)
+    x = np.clip((img - dom_min) / denom, 0.0, 1.0)
+    s = lut_table.shape[0]
+    x = x * (s - 1)
+    r, g, b = x[..., 0], x[..., 1], x[..., 2]
+    r0 = np.floor(r).astype(np.int32)
+    g0 = np.floor(g).astype(np.int32)
+    b0 = np.floor(b).astype(np.int32)
+    r1 = np.clip(r0 + 1, 0, s - 1)
+    g1 = np.clip(g0 + 1, 0, s - 1)
+    b1 = np.clip(b0 + 1, 0, s - 1)
+    dr = (r - r0).astype(np.float32)
+    dg = (g - g0).astype(np.float32)
+    db = (b - b0).astype(np.float32)
+    r0f, r1f = r0.reshape(-1), r1.reshape(-1)
+    g0f, g1f = g0.reshape(-1), g1.reshape(-1)
+    b0f, b1f = b0.reshape(-1), b1.reshape(-1)
+    drf = dr.reshape(-1)[:, None]
+    dgf = dg.reshape(-1)[:, None]
+    dbf = db.reshape(-1)[:, None]
+    T = lut_table
+    c000 = T[b0f, g0f, r0f]
+    c100 = T[b0f, g0f, r1f]
+    c010 = T[b0f, g1f, r0f]
+    c110 = T[b0f, g1f, r1f]
+    c001 = T[b1f, g0f, r0f]
+    c101 = T[b1f, g0f, r1f]
+    c011 = T[b1f, g1f, r0f]
+    c111 = T[b1f, g1f, r1f]
+    c00 = c000 * (1 - drf) + c100 * drf
+    c01 = c001 * (1 - drf) + c101 * drf
+    c10 = c010 * (1 - drf) + c110 * drf
+    c11 = c011 * (1 - drf) + c111 * drf
+    c0 = c00 * (1 - dgf) + c10 * dgf
+    c1 = c01 * (1 - dgf) + c11 * dgf
+    out = (c0 * (1 - dbf) + c1 * dbf).reshape(h, w, 3).astype(np.float32)
+    out = np.clip(out, 0.0, None)
+    if strength < 1.0:
+        out = img[:, :, :3].astype(np.float32) * (1.0 - strength) + out * strength
+    return out.astype(np.float32)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EXPORT TO PRORES / CINEMA FORMATS (via FFmpeg)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _find_ffmpeg():
+    """Return path to ffmpeg executable or None."""
+    import shutil
+    return shutil.which("ffmpeg")
+
+# Codec presets: (display_name, -c:v value, extra args)
+_EXPORT_CODECS_MOV = [
+    ("ProRes 422 LT", "prores_ks", ["-profile:v", "1"]),
+    ("ProRes 422 HQ", "prores_ks", ["-profile:v", "3"]),
+    ("ProRes 4444", "prores_ks", ["-profile:v", "4", "-pix_fmt", "yuv444p10le"]),
+    ("ProRes 4444 XQ", "prores_ks", ["-profile:v", "5", "-pix_fmt", "yuv444p10le"]),
+    ("DNxHR HQX (10-bit)", "dnxhr", ["-profile:v", "dnxhr_hqx"]),
+    ("DNxHR 444 (12-bit)", "dnxhr", ["-profile:v", "dnxhr_444"]),
+]
+_EXPORT_CODECS_MP4 = [
+    ("H.264 High", "libx264", ["-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p"]),
+    ("H.265 / HEVC", "libx265", ["-preset", "slow", "-crf", "20", "-pix_fmt", "yuv420p"]),
+]
+
+def _export_sequence_via_ffmpeg(frame_paths, output_path, format_mov, codec_key, scale_vf, fps):
+    """
+    Export EXR sequence to .mov or .mp4 using FFmpeg.
+    format_mov: True = MOV (ProRes/DNx), False = MP4 (H.264/H.265).
+    codec_key: index into _EXPORT_CODECS_MOV or _EXPORT_CODECS_MP4.
+    scale_vf: None or e.g. "scale=3840:2160".
+    Returns (success: bool, message: str).
+    """
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
+        return False, "FFmpeg not found. Install FFmpeg and add it to PATH (see README / IT permissions)."
+    if not frame_paths:
+        return False, "No frames to export."
+    codecs = _EXPORT_CODECS_MOV if format_mov else _EXPORT_CODECS_MP4
+    if codec_key < 0 or codec_key >= len(codecs):
+        return False, "Invalid codec."
+    name, coder, extra = codecs[codec_key]
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+        for p in frame_paths:
+            esc = p.replace("\\", "/").replace("'", "'\\''")
+            f.write("file '%s'\n" % esc)
+        list_path = f.name
+    try:
+        cmd = [
+            ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+            "-r", str(fps), "-c:v", coder,
+        ] + extra
+        if not format_mov:
+            cmd.extend(["-f", "mp4"])
+        if scale_vf:
+            cmd.extend(["-vf", scale_vf])
+        cmd.append(output_path)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        if proc.returncode != 0:
+            return False, (proc.stderr or proc.stdout or "FFmpeg failed.")[-1500:]
+        return True, "Exported to %s" % output_path
+    except subprocess.TimeoutExpired:
+        return False, "Export timed out."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        try:
+            os.unlink(list_path)
+        except Exception:
+            pass
+
+
+class ExportWorker(QThread):
+    """Run export in background and emit result. Optionally apply grading (load frame, grade, write temp, then ffmpeg)."""
+    finished_signal = pyqtSignal(bool, str)
+
+    def __init__(self, frame_paths, output_path, format_mov, codec_key, scale_vf, fps, grading_params=None):
+        super().__init__()
+        self.frame_paths = frame_paths
+        self.output_path = output_path
+        self.format_mov = format_mov
+        self.codec_key = codec_key
+        self.scale_vf = scale_vf
+        self.fps = fps
+        self.grading_params = grading_params or {}
+
+    def run(self):
+        paths = self.frame_paths
+        if self.grading_params:
+            import tempfile
+            tmpdir = tempfile.mkdtemp()
+            temp_paths = [os.path.join(tmpdir, "frame_%06d.exr" % j) for j in range(len(self.frame_paths))]
+            try:
+                for i, p in enumerate(self.frame_paths):
+                    img = load_exr_frame(p, return_alpha=True)
+                    if img is None:
+                        self.finished_signal.emit(False, "Failed to load frame: %s" % p)
+                        return
+                    img = apply_grading(img, **self.grading_params)
+                    if not write_exr_frame(temp_paths[i], img):
+                        self.finished_signal.emit(False, "Failed to write temp frame.")
+                        return
+                ok, msg = _export_sequence_via_ffmpeg(
+                    temp_paths, self.output_path,
+                    self.format_mov, self.codec_key, self.scale_vf, self.fps,
+                )
+            finally:
+                try:
+                    for p in temp_paths:
+                        if os.path.isfile(p):
+                            os.unlink(p)
+                    os.rmdir(tmpdir)
+                except Exception:
+                    pass
+        else:
+            ok, msg = _export_sequence_via_ffmpeg(
+                paths, self.output_path,
+                self.format_mov, self.codec_key, self.scale_vf, self.fps,
+            )
+        self.finished_signal.emit(ok, msg)
+
+
+class ExportDialog(QDialog):
+    """Options for cinema export (format, codec, resolution, fps)."""
+    def __init__(self, parent=None, default_fps=24):
+        super().__init__(parent)
+        self.setWindowTitle("Export to ProRes / Cinema / MP4")
+        self.setStyleSheet(STYLESHEET)
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        # Format
+        layout.addWidget(QLabel("Output format"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItem("MOV (ProRes / DNxHR)", True)
+        self.format_combo.addItem("MP4 (H.264 / H.265)", False)
+        self.format_combo.currentIndexChanged.connect(self._on_format_changed)
+        layout.addWidget(self.format_combo)
+        # Codec
+        layout.addWidget(QLabel("Codec"))
+        self.codec_combo = QComboBox()
+        self._fill_codecs(format_mov=True)
+        layout.addWidget(self.codec_combo)
+        # Resolution
+        layout.addWidget(QLabel("Resolution"))
+        self.res_combo = QComboBox()
+        self.res_combo.addItem("Source (no scaling)", None)
+        self.res_combo.addItem("4K UHD (3840×2160)", "scale=3840:2160")
+        self.res_combo.addItem("4K DCI (4096×2160)", "scale=4096:2160")
+        layout.addWidget(self.res_combo)
+        # FPS
+        layout.addWidget(QLabel("Frame rate (fps)"))
+        self.fps_spin = QSpinBox()
+        self.fps_spin.setRange(1, 120)
+        self.fps_spin.setValue(default_fps)
+        layout.addWidget(self.fps_spin)
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        ok_btn = QPushButton("Export")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(ok_btn)
+        layout.addLayout(btn_row)
+
+    def _fill_codecs(self, format_mov):
+        self.codec_combo.clear()
+        codecs = _EXPORT_CODECS_MOV if format_mov else _EXPORT_CODECS_MP4
+        for name, _, _ in codecs:
+            self.codec_combo.addItem(name)
+        self.codec_combo.setCurrentIndex(0)
+
+    def _on_format_changed(self):
+        format_mov = self.format_combo.currentData()
+        self._fill_codecs(format_mov)
+
+    def get_options(self):
+        format_mov = self.format_combo.currentData()
+        return {
+            "format_mov": format_mov,
+            "codec_key": self.codec_combo.currentIndex(),
+            "scale_vf": self.res_combo.currentData(),
+            "fps": self.fps_spin.value(),
+        }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1144,6 +1555,311 @@ class ImagePreviewWidget(InteractiveCanvas):
             self.draw()
 
 
+def _tonemap_for_display(img_float):
+    """Reinhard + gamma for display (same as ImagePreviewWidget)."""
+    if img_float is None or img_float.size == 0:
+        return None
+    img = np.clip(img_float.astype(np.float64), 0, None)
+    img = img / (1.0 + img)
+    return np.power(np.clip(img, 0, 1), 1.0 / 2.2).astype(np.float32)
+
+
+class SplitComparisonWidget(QWidget):
+    """Before/after split view with draggable divider (JuxtaposeJS-style)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(STYLESHEET)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.img_left = None
+        self.img_right = None
+        self.label_left = "Original"
+        self.label_right = "LUT"
+        self.split_ratio = 0.5
+        self._fig = Figure(figsize=(8, 5), facecolor=COLORS['bg_card'])
+        self._canvas = FigureCanvas(self._fig)
+        self._canvas.setMinimumHeight(300)
+        self.ax = self._fig.add_axes([0, 0, 1, 1], facecolor=COLORS['bg_card'])
+        self.ax.set_axis_off()
+        layout.addWidget(self._canvas)
+        slider_row = QHBoxLayout()
+        slider_row.addWidget(QLabel("← Original"))
+        self.split_slider = QSlider(Qt.Horizontal)
+        self.split_slider.setRange(0, 1000)
+        self.split_slider.setValue(500)
+        self.split_slider.valueChanged.connect(self._on_slider)
+        slider_row.addWidget(self.split_slider, stretch=1)
+        slider_row.addWidget(QLabel("LUT →"))
+        layout.addLayout(slider_row)
+        self._render()
+
+    def _on_slider(self, val):
+        self.split_ratio = val / 1000.0
+        self._render()
+
+    def update_comparison(self, img_left, img_right, label_left="Original", label_right="LUT"):
+        self.img_left = img_left
+        self.img_right = img_right
+        self.label_left = label_left
+        self.label_right = label_right
+        self._render()
+
+    def _render(self):
+        self.ax.clear()
+        self.ax.set_axis_off()
+        if self.img_left is None and self.img_right is None:
+            self.ax.text(0.5, 0.5, "No comparison — load a frame and enable LUT compare", ha='center', va='center',
+                        color=COLORS['text_dim'], fontsize=11, transform=self.ax.transAxes)
+            self._canvas.draw()
+            return
+        split = self.split_ratio
+        H, W = 0, 0
+        if self.img_left is not None:
+            H, W = self.img_left.shape[:2]
+        if self.img_right is not None and self.img_right.size > 0:
+            h, w = self.img_right.shape[:2]
+            H, W = max(H, h), max(W, w)
+        if H == 0 or W == 0:
+            self._canvas.draw()
+            return
+        # Use same aspect and extent 0..1 so split is in normalized coords
+        self.ax.set_xlim(0, 1)
+        self.ax.set_ylim(1, 0)
+        self.ax.set_aspect("auto")
+        if self.img_left is not None:
+            L = _tonemap_for_display(self.img_left[:, :, :3])
+            if L is not None:
+                self.ax.imshow(L, extent=[0, split, 1, 0], aspect="auto", interpolation="bilinear")
+        if self.img_right is not None and self.img_right.size > 0:
+            R = _tonemap_for_display(self.img_right[:, :, :3])
+            if R is not None:
+                self.ax.imshow(R, extent=[split, 1, 1, 0], aspect="auto", interpolation="bilinear")
+        self.ax.axvline(x=split, color='white', linewidth=2, linestyle='-')
+        self.ax.text(0.02, 0.98, self.label_left, fontsize=10, color='white', verticalalignment='top',
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='#333', alpha=0.9))
+        self.ax.text(0.98, 0.98, self.label_right, fontsize=10, color='white', verticalalignment='top',
+                     horizontalalignment='right',
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='#333', alpha=0.9))
+        self._canvas.draw_idle()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LUT PANEL (folder, dropdown, strength, compare mode)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class LUTPanel(QWidget):
+    """LUT folder path, dropdown selection, strength slider+spinbox, compare mode (Original vs LUT / LUT A vs LUT B)."""
+    lut_changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(STYLESHEET)
+        self.setMinimumWidth(260)
+        self.setMaximumWidth(340)
+        self._lut_dir = ""
+        self._lut_paths = []
+        self._lut_cache = {}  # path -> (size, domain_min, domain_max, table)
+        self._assume_bgr = True
+        layout = QVBoxLayout(self)
+        grp = QGroupBox("LUT (.cube)")
+        grp.setStyleSheet("QGroupBox { font-weight: 600; }")
+        gl = QVBoxLayout(grp)
+        row = QHBoxLayout()
+        self.folder_btn = QPushButton("LUT folder…")
+        self.folder_btn.clicked.connect(self._pick_folder)
+        row.addWidget(self.folder_btn)
+        self.path_label = QLabel("No folder")
+        self.path_label.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 10px;")
+        self.path_label.setWordWrap(True)
+        row.addWidget(self.path_label, stretch=1)
+        gl.addLayout(row)
+        gl.addWidget(QLabel("LUT A"))
+        self.lut_a_combo = QComboBox()
+        self.lut_a_combo.currentIndexChanged.connect(self._emit)
+        gl.addWidget(self.lut_a_combo)
+        strength_row = QHBoxLayout()
+        strength_row.addWidget(QLabel("Strength"))
+        self.strength_slider = QSlider(Qt.Horizontal)
+        self.strength_slider.setRange(0, 1000)
+        self.strength_slider.setValue(1000)
+        self.strength_slider.valueChanged.connect(self._sync_strength_to_spin)
+        strength_row.addWidget(self.strength_slider, stretch=1)
+        self.strength_spin = QDoubleSpinBox()
+        self.strength_spin.setRange(0.0, 1.0)
+        self.strength_spin.setValue(1.0)
+        self.strength_spin.setDecimals(2)
+        self.strength_spin.setSingleStep(0.05)
+        self.strength_spin.setMinimumWidth(52)
+        self.strength_spin.valueChanged.connect(self._sync_strength_to_slider)
+        strength_row.addWidget(self.strength_spin)
+        gl.addLayout(strength_row)
+        gl.addWidget(QLabel("Compare"))
+        self.compare_combo = QComboBox()
+        self.compare_combo.addItem("Off", "off")
+        self.compare_combo.addItem("Original vs LUT A", "original_vs_a")
+        self.compare_combo.addItem("LUT A vs LUT B", "a_vs_b")
+        self.compare_combo.currentIndexChanged.connect(self._on_compare_mode)
+        gl.addWidget(self.compare_combo)
+        self._lut_b_label = QLabel("LUT B")
+        gl.addWidget(self._lut_b_label)
+        self.lut_b_combo = QComboBox()
+        self.lut_b_combo.currentIndexChanged.connect(self._emit)
+        gl.addWidget(self.lut_b_combo)
+        self.lut_b_combo.setVisible(False)
+        self._lut_b_label.setVisible(False)
+        self.assume_cb = QCheckBox("Alternate .cube order (if colors wrong)")
+        self.assume_cb.setChecked(False)
+        self.assume_cb.toggled.connect(self._on_assume)
+        gl.addWidget(self.assume_cb)
+        layout.addWidget(grp)
+        # Default: point to lut folder in project root, life_is_a_lemon.cube at 0.20
+        self._set_default_lut_folder()
+
+    def _set_default_lut_folder(self):
+        default_dir = os.path.join(_ROOT, "lut")
+        if not os.path.isdir(default_dir):
+            return
+        self._lut_dir = default_dir
+        self.path_label.setText(os.path.basename(default_dir) or "lut")
+        paths = []
+        for name in sorted(os.listdir(default_dir)):
+            if name.lower().endswith(".cube"):
+                paths.append(os.path.join(default_dir, name))
+        self._lut_paths = paths
+        self._lut_cache.clear()
+        self.lut_a_combo.blockSignals(True)
+        self.lut_b_combo.blockSignals(True)
+        self.lut_a_combo.clear()
+        self.lut_b_combo.clear()
+        for p in paths:
+            name = os.path.basename(p)
+            self.lut_a_combo.addItem(name, p)
+            self.lut_b_combo.addItem(name, p)
+        default_lut_name = "life_is_a_lemon.cube"
+        idx_a = next((i for i in range(self.lut_a_combo.count()) if self.lut_a_combo.itemText(i) == default_lut_name), 0)
+        self.lut_a_combo.setCurrentIndex(idx_a)
+        self.lut_b_combo.setCurrentIndex(min(idx_a + 1, self.lut_b_combo.count() - 1) if self.lut_b_combo.count() > 1 else 0)
+        self.lut_a_combo.blockSignals(False)
+        self.lut_b_combo.blockSignals(False)
+        self.strength_slider.blockSignals(True)
+        self.strength_spin.blockSignals(True)
+        self.strength_slider.setValue(200)
+        self.strength_spin.setValue(0.20)
+        self.strength_slider.blockSignals(False)
+        self.strength_spin.blockSignals(False)
+
+    def _pick_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select folder containing .cube files", self._lut_dir or "")
+        if not folder:
+            return
+        self._lut_dir = folder
+        self.path_label.setText(os.path.basename(folder) or folder)
+        paths = []
+        for name in sorted(os.listdir(folder)):
+            if name.lower().endswith(".cube"):
+                paths.append(os.path.join(folder, name))
+        self._lut_paths = paths
+        self._lut_cache.clear()
+        self.lut_a_combo.clear()
+        self.lut_b_combo.clear()
+        for p in paths:
+            name = os.path.basename(p)
+            self.lut_a_combo.addItem(name, p)
+            self.lut_b_combo.addItem(name, p)
+        if paths:
+            self.lut_a_combo.setCurrentIndex(0)
+            self.lut_b_combo.setCurrentIndex(min(1, len(paths) - 1))
+        self.lut_changed.emit()
+
+    def _on_compare_mode(self):
+        is_ab = self.compare_combo.currentData() == "a_vs_b"
+        self.lut_b_combo.setVisible(is_ab)
+        self._lut_b_label.setVisible(is_ab)
+        self.lut_changed.emit()
+
+    def _on_assume(self, checked):
+        self._assume_bgr = not checked
+        self._lut_cache.clear()
+        self.lut_changed.emit()
+
+    def _sync_strength_to_spin(self):
+        self.strength_spin.setValue(self.strength_slider.value() / 1000.0)
+
+    def _sync_strength_to_slider(self):
+        self.strength_slider.blockSignals(True)
+        self.strength_slider.setValue(int(self.strength_spin.value() * 1000))
+        self.strength_slider.blockSignals(False)
+        self._emit()
+
+    def _emit(self):
+        self.lut_changed.emit()
+
+    def get_lut_dir(self):
+        return self._lut_dir
+
+    def get_compare_mode(self):
+        return self.compare_combo.currentData()
+
+    def get_strength_a(self):
+        return self.strength_spin.value()
+
+    def get_lut_a_path(self):
+        if self.lut_a_combo.count() == 0:
+            return None
+        return self.lut_a_combo.currentData()
+
+    def get_lut_b_path(self):
+        if self.compare_combo.currentData() != "a_vs_b" or self.lut_b_combo.count() == 0:
+            return None
+        return self.lut_b_combo.currentData()
+
+    def _load_lut(self, path):
+        if path is None:
+            return None
+        if path in self._lut_cache:
+            return self._lut_cache[path]
+        try:
+            size, dmin, dmax, table = load_cube_lut(path, assume_bgr_major=self._assume_bgr)
+            self._lut_cache[path] = (size, dmin, dmax, table)
+            return self._lut_cache[path]
+        except Exception:
+            return None
+
+    def apply_lut_a(self, rgb_float):
+        path = self.get_lut_a_path()
+        if path is None or rgb_float is None:
+            return rgb_float
+        lut = self._load_lut(path)
+        if lut is None:
+            return rgb_float
+        size, dmin, dmax, table = lut
+        return apply_lut_float(rgb_float, table, dmin, dmax, strength=self.get_strength_a())
+
+    def apply_lut_b(self, rgb_float):
+        path = self.get_lut_b_path()
+        if path is None or rgb_float is None:
+            return rgb_float
+        lut = self._load_lut(path)
+        if lut is None:
+            return rgb_float
+        size, dmin, dmax, table = lut
+        return apply_lut_float(rgb_float, table, dmin, dmax, strength=self.get_strength_a())
+
+    def get_left_right_for_compare(self, graded_rgb):
+        """Return (img_left, img_right, label_left, label_right) for current compare mode."""
+        mode = self.get_compare_mode()
+        if mode == "off" or graded_rgb is None:
+            return None, None, "", ""
+        if mode == "original_vs_a":
+            right = self.apply_lut_a(graded_rgb)
+            return graded_rgb, right, "Original", (self.lut_a_combo.currentText() + f" ({self.get_strength_a():.2f})")
+        if mode == "a_vs_b":
+            left = self.apply_lut_a(graded_rgb)
+            right = self.apply_lut_b(graded_rgb)
+            return left, right, self.lut_a_combo.currentText(), self.lut_b_combo.currentText()
+        return None, None, "", ""
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # VISUALIZATION PANEL WITH FULLSCREEN BUTTON
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1254,6 +1970,474 @@ class VisualizationPanel(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# COLOR & ALPHA GRADING PANEL (sliders + spinboxes + color cues + reset)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SLIDER_RES = 1000  # slider range 0..1000 for smooth mapping
+
+
+def _value_to_slider(val, low, high):
+    if high <= low:
+        return 0
+    return int(_SLIDER_RES * (val - low) / (high - low))
+
+
+def _slider_to_value(s, low, high):
+    return low + (high - low) * (s / _SLIDER_RES)
+
+
+class _GradingRow(QWidget):
+    """One row: color strip, label, slider, spinbox, reset. Stays in sync and emits on change."""
+    def __init__(self, label, low, high, default, tooltip, strip_color, parent=None):
+        super().__init__(parent)
+        self.low, self.high, self.default = low, high, default
+        self._block = False
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(8)
+        # Color strip (visual cue)
+        strip = QFrame()
+        strip.setFixedSize(6, 32)
+        strip.setStyleSheet(f"background: {strip_color}; border-radius: 3px;")
+        strip.setToolTip(tooltip)
+        layout.addWidget(strip)
+        # Label
+        lbl = QLabel(label)
+        lbl.setMinimumWidth(72)
+        lbl.setStyleSheet(f"color: {COLORS['text']}; font-size: 12px; font-weight: 500;")
+        lbl.setToolTip(tooltip)
+        layout.addWidget(lbl)
+        # Slider
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(0, _SLIDER_RES)
+        self.slider.setValue(_value_to_slider(default, low, high))
+        self.slider.setMinimumHeight(24)
+        self.slider.valueChanged.connect(self._on_slider)
+        layout.addWidget(self.slider, stretch=1)
+        # Spinbox
+        self.spin = QDoubleSpinBox()
+        self.spin.setRange(low, high)
+        self.spin.setValue(default)
+        self.spin.setDecimals(2)
+        self.spin.setSingleStep(0.1)
+        self.spin.setMinimumWidth(56)
+        self.spin.setMaximumWidth(64)
+        self.spin.valueChanged.connect(self._on_spin)
+        layout.addWidget(self.spin)
+        # Reset
+        self.reset_btn = QPushButton("↺")
+        self.reset_btn.setFixedSize(28, 28)
+        self.reset_btn.setToolTip("Reset to default")
+        self.reset_btn.clicked.connect(self._reset)
+        layout.addWidget(self.reset_btn)
+        self.changed_callback = None
+
+    def _on_slider(self, val):
+        if self._block:
+            return
+        self._block = True
+        v = _slider_to_value(val, self.low, self.high)
+        self.spin.setValue(round(v, 2))
+        self._block = False
+        if self.changed_callback:
+            self.changed_callback()
+
+    def _on_spin(self, val):
+        if self._block:
+            return
+        self._block = True
+        self.slider.setValue(_value_to_slider(val, self.low, self.high))
+        self._block = False
+        if self.changed_callback:
+            self.changed_callback()
+
+    def _reset(self):
+        self._block = True
+        self.spin.setValue(self.default)
+        self.slider.setValue(_value_to_slider(self.default, self.low, self.high))
+        self._block = False
+        if self.changed_callback:
+            self.changed_callback()
+
+    def value(self):
+        return self.spin.value()
+
+
+class GradingPanel(QWidget):
+    """User-friendly color & alpha grading: sliders, spinboxes, color strips, tooltips, reset."""
+    grading_changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(STYLESHEET)
+        self.setMinimumWidth(260)
+        self.setMaximumWidth(340)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        # —— Color ——
+        color_grp = QGroupBox("Color")
+        color_grp.setStyleSheet("QGroupBox { font-weight: 600; }")
+        color_layout = QVBoxLayout(color_grp)
+        color_layout.setSpacing(0)
+        self.exposure_row = _GradingRow(
+            "Exposure", -3.0, 3.0, 0.0,
+            "Overall brightness in stops. +1 = 2× brighter.",
+            "qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #1a1a1a, stop:1 #e8e8e8)",
+            self,
+        )
+        self.exposure_row.changed_callback = self._emit_changed
+        color_layout.addWidget(self.exposure_row)
+        self.gamma_row = _GradingRow(
+            "Gamma", 0.5, 4.0, 2.2,
+            "Midtone curve. Lower = brighter midtones, higher = more contrast.",
+            "#606060",
+            self,
+        )
+        self.gamma_row.changed_callback = self._emit_changed
+        color_layout.addWidget(self.gamma_row)
+        self.lift_row = _GradingRow(
+            "Lift", -0.5, 0.5, 0.0,
+            "Shadow level. Add or subtract from blacks.",
+            "#1a1a1a",
+            self,
+        )
+        self.lift_row.changed_callback = self._emit_changed
+        color_layout.addWidget(self.lift_row)
+        self.gain_row = _GradingRow(
+            "Gain", 0.1, 5.0, 1.0,
+            "Highlight multiplier. Brightens or darkens highlights.",
+            "#c0c0c0",
+            self,
+        )
+        self.gain_row.changed_callback = self._emit_changed
+        color_layout.addWidget(self.gain_row)
+        self.saturation_row = _GradingRow(
+            "Saturation", 0.0, 3.0, 1.0,
+            "Chroma intensity. 0 = grayscale, 1 = unchanged, >1 = more vivid.",
+            COLORS['accent'],
+            self,
+        )
+        self.saturation_row.changed_callback = self._emit_changed
+        color_layout.addWidget(self.saturation_row)
+        layout.addWidget(color_grp)
+        # —— Alpha ——
+        alpha_grp = QGroupBox("Alpha")
+        alpha_grp.setStyleSheet("QGroupBox { font-weight: 600; }")
+        alpha_layout = QVBoxLayout(alpha_grp)
+        self.alpha_row = _GradingRow(
+            "Alpha", 0.0, 3.0, 1.0,
+            "Scale the alpha channel. 0 = fully transparent, 1 = unchanged.",
+            "qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #444, stop:0.5 #888, stop:1 #444)",
+            self,
+        )
+        self.alpha_row.changed_callback = self._emit_changed
+        alpha_layout.addWidget(self.alpha_row)
+        layout.addWidget(alpha_grp)
+        # Reset all
+        reset_all = QPushButton("Reset all")
+        reset_all.setToolTip("Reset all controls to default")
+        reset_all.clicked.connect(self._reset_all)
+        layout.addWidget(reset_all)
+        layout.addStretch()
+
+    def _emit_changed(self):
+        self.grading_changed.emit()
+
+    def _reset_all(self):
+        self.exposure_row._reset()
+        self.gamma_row._reset()
+        self.lift_row._reset()
+        self.gain_row._reset()
+        self.saturation_row._reset()
+        self.alpha_row._reset()
+        self.grading_changed.emit()
+
+    def get_grading(self):
+        return {
+            "exposure": self.exposure_row.value(),
+            "gamma": self.gamma_row.value(),
+            "lift": self.lift_row.value(),
+            "gain": self.gain_row.value(),
+            "saturation": self.saturation_row.value(),
+            "alpha_scale": self.alpha_row.value(),
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SEQUENCE PLAYBACK TAB (EXR folder playback; inspired by Grizzly Peak 3D / DJV)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _natural_sort_key(s):
+    """Sort key for frame names (e.g. frame_001.exr, frame_002.exr)."""
+    return [int(x) if x.isdigit() else x.lower() for x in re.split(r'(\d+)', s)]
+
+
+class SequencePlaybackTab(QWidget):
+    """Load a folder of EXR frames and play them back. Keeps Analyzer look and feel."""
+    
+    _CACHE_MAX = 15  # max cached EXR frames to keep playback responsive
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(STYLESHEET)
+        self.frame_paths = []
+        self.current_index = 0
+        self.playing = False
+        self._play_timer = QTimer(self)
+        self._play_timer.timeout.connect(self._on_play_tick)
+        self._fps = 24
+        self._frame_cache = {}  # path -> img (LRU by insertion order, bounded)
+        self._cache_order = []  # list of path in order added
+        self._grading = {}
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 16, 20, 16)
+        main_layout.setSpacing(12)
+        splitter = QSplitter(Qt.Horizontal)
+        # Left: toolbar + image + playback
+        left = QWidget()
+        layout = QVBoxLayout(left)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        toolbar = QHBoxLayout()
+        load_btn = QPushButton("Load EXR folder")
+        load_btn.clicked.connect(self._load_folder)
+        toolbar.addWidget(load_btn)
+        self.path_label = QLabel("No folder loaded")
+        self.path_label.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 12px;")
+        self.path_label.setMinimumWidth(200)
+        toolbar.addWidget(self.path_label)
+        self.count_label = QLabel("0 frames")
+        self.count_label.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 12px;")
+        toolbar.addWidget(self.count_label)
+        self.export_btn = QPushButton("Export to ProRes / Cinema / MP4…")
+        self.export_btn.clicked.connect(self._export_sequence)
+        self.export_btn.setEnabled(False)
+        toolbar.addWidget(self.export_btn)
+        toolbar.addStretch()
+        link = QLabel('<a href="https://github.com/grizzlypeak3d/djv" style="color: %s;">DJV — pro playback (Grizzly Peak 3D)</a>' % COLORS['accent'])
+        link.setOpenExternalLinks(True)
+        link.setStyleSheet(f"font-size: 11px;")
+        toolbar.addWidget(link)
+        layout.addLayout(toolbar)
+        self.preview_stack = QStackedWidget()
+        self.image_panel = VisualizationPanel("Sequence Preview", ImagePreviewWidget, self)
+        self.preview_stack.addWidget(self.image_panel)
+        self.compare_widget = SplitComparisonWidget(self)
+        self.preview_stack.addWidget(self.compare_widget)
+        layout.addWidget(self.preview_stack, stretch=1)
+        controls = QHBoxLayout()
+        self.play_btn = QPushButton("▶ Play")
+        self.play_btn.clicked.connect(self._toggle_play)
+        self.play_btn.setEnabled(False)
+        controls.addWidget(self.play_btn)
+        self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider.setMinimum(0)
+        self.frame_slider.setMaximum(0)
+        self.frame_slider.valueChanged.connect(self._on_slider_changed)
+        self.frame_slider.setMinimumWidth(300)
+        controls.addWidget(self.frame_slider)
+        self.frame_spin = QSpinBox()
+        self.frame_spin.setMinimum(0)
+        self.frame_spin.setMaximum(0)
+        self.frame_spin.valueChanged.connect(self._on_spin_changed)
+        self.frame_spin.setPrefix("Frame ")
+        controls.addWidget(self.frame_spin)
+        controls.addWidget(QLabel("FPS"))
+        self.fps_spin = QSpinBox()
+        self.fps_spin.setRange(1, 120)
+        self.fps_spin.setValue(24)
+        self.fps_spin.valueChanged.connect(self._on_fps_changed)
+        controls.addWidget(self.fps_spin)
+        controls.addStretch()
+        layout.addLayout(controls)
+        splitter.addWidget(left)
+        right_side = QWidget()
+        right_layout = QVBoxLayout(right_side)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        self.grading_panel = GradingPanel(self)
+        self.grading_panel.grading_changed.connect(self._on_grading_changed)
+        right_layout.addWidget(self.grading_panel)
+        self.lut_panel = LUTPanel(self)
+        self.lut_panel.lut_changed.connect(self._on_lut_changed)
+        right_layout.addWidget(self.lut_panel)
+        right_layout.addStretch()
+        splitter.addWidget(right_side)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        main_layout.addWidget(splitter)
+        self._grading = self.grading_panel.get_grading()
+
+    def _on_grading_changed(self):
+        self._grading = self.grading_panel.get_grading()
+        self._show_frame_at(self.current_index)
+
+    def _on_lut_changed(self):
+        self._show_frame_at(self.current_index)
+    
+    def _load_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select folder of EXR frames", "")
+        if not folder:
+            return
+        paths = []
+        for name in os.listdir(folder):
+            if name.lower().endswith('.exr'):
+                paths.append(os.path.join(folder, name))
+        paths.sort(key=lambda p: _natural_sort_key(os.path.basename(p)))
+        self.frame_paths = paths
+        self.current_index = 0
+        self.playing = False
+        self._play_timer.stop()
+        n = len(paths)
+        self._frame_cache.clear()
+        self._cache_order.clear()
+        self.path_label.setText(os.path.basename(folder) or folder)
+        self._update_count_label()
+        self.frame_slider.setMaximum(max(0, n - 1))
+        self.frame_spin.setMaximum(max(0, n - 1))
+        self.play_btn.setEnabled(n > 0)
+        self.export_btn.setEnabled(n > 0)
+        if n > 0:
+            self._show_frame_at(self.current_index)
+        else:
+            self.preview_stack.setCurrentIndex(0)
+            self.image_panel.update_data(img_data=None, exposure=0.0)
+    
+    def _toggle_play(self):
+        if not self.frame_paths:
+            return
+        self.playing = not self.playing
+        self.play_btn.setText("⏸ Pause" if self.playing else "▶ Play")
+        if self.playing:
+            self._play_timer.start(int(1000 / self._fps))
+        else:
+            self._play_timer.stop()
+    
+    def _on_play_tick(self):
+        if not self.frame_paths:
+            return
+        self.current_index = (self.current_index + 1) % len(self.frame_paths)
+        self.frame_slider.blockSignals(True)
+        self.frame_spin.blockSignals(True)
+        self.frame_slider.setValue(self.current_index)
+        self.frame_spin.setValue(self.current_index)
+        self.frame_slider.blockSignals(False)
+        self.frame_spin.blockSignals(False)
+        self._show_frame_at(self.current_index)
+    
+    def _on_slider_changed(self, value):
+        self.current_index = value
+        self.frame_spin.blockSignals(True)
+        self.frame_spin.setValue(value)
+        self.frame_spin.blockSignals(False)
+        self._show_frame_at(self.current_index)
+    
+    def _on_spin_changed(self, value):
+        self.current_index = value
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setValue(value)
+        self.frame_slider.blockSignals(False)
+        self._show_frame_at(self.current_index)
+    
+    def _on_fps_changed(self, value):
+        self._fps = value
+        self._update_count_label()
+        if self.playing:
+            self._play_timer.setInterval(int(1000 / self._fps))
+
+    def _update_count_label(self):
+        """Update count label to show frames and duration at current FPS."""
+        n = len(self.frame_paths)
+        if n == 0:
+            self.count_label.setText("0 frames")
+            return
+        dur = n / self._fps
+        self.count_label.setText(f"{n} frames · {dur:.1f} s at {self._fps} fps")
+
+    def _show_frame_at(self, index):
+        if not self.frame_paths or index < 0 or index >= len(self.frame_paths):
+            return
+        path = self.frame_paths[index]
+        # Use cache to avoid re-reading from disk every time (speeds up playback/scrub)
+        img = self._frame_cache.get(path)
+        if img is None:
+            img = load_exr_frame(path)
+            if img is not None:
+                self._frame_cache[path] = img
+                self._cache_order.append(path)
+                while len(self._frame_cache) > self._CACHE_MAX and self._cache_order:
+                    old = self._cache_order.pop(0)
+                    self._frame_cache.pop(old, None)
+        else:
+            # LRU: move to end so this frame is evicted last
+            if path in self._cache_order:
+                self._cache_order.remove(path)
+                self._cache_order.append(path)
+        if img is not None:
+            graded = apply_grading(img, **self._grading)
+            compare_mode = self.lut_panel.get_compare_mode()
+            if compare_mode != "off":
+                left, right, lbl_left, lbl_right = self.lut_panel.get_left_right_for_compare(graded)
+                self.preview_stack.setCurrentIndex(1)
+                self.compare_widget.update_comparison(left, right, lbl_left, lbl_right)
+            else:
+                self.preview_stack.setCurrentIndex(0)
+                display = self.lut_panel.apply_lut_a(graded) if self.lut_panel.get_lut_a_path() else graded
+                self.image_panel.update_data(img_data=display, exposure=0.0)
+        else:
+            self.preview_stack.setCurrentIndex(0)
+            self.image_panel.update_data(img_data=None, exposure=0.0)
+
+    def _export_sequence(self):
+        if not self.frame_paths:
+            QMessageBox.warning(self, "Export", "Load an EXR folder first.")
+            return
+        if not _find_ffmpeg():
+            QMessageBox.warning(
+                self, "Export",
+                "FFmpeg not found. Install FFmpeg and add it to PATH.\n\n"
+                "See README and IT_PERMISSIONS_REQUEST.md for network/execution permissions."
+            )
+            return
+        opts = ExportDialog(self, default_fps=self._fps)
+        if opts.exec_() != QDialog.Accepted:
+            return
+        o = opts.get_options()
+        ext = ".mov" if o["format_mov"] else ".mp4"
+        first_name = os.path.splitext(os.path.basename(self.frame_paths[0]))[0] + ext
+        filt = "QuickTime (*.mov);;MP4 (*.mp4);;All Files (*)" if o["format_mov"] else "MP4 (*.mp4);;QuickTime (*.mov);;All Files (*)"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export to ProRes / Cinema / MP4",
+            first_name,
+            filt
+        )
+        if not path:
+            return
+        if not path.lower().endswith((".mov", ".mp4")):
+            path = path + ext
+        progress = QProgressDialog("Exporting…", None, 0, 0, self)
+        progress.setWindowTitle("Export")
+        progress.setMinimumDuration(0)
+        progress.show()
+        grading = self._grading if hasattr(self, "_grading") else None
+        self._export_worker = ExportWorker(
+            self.frame_paths, path,
+            o["format_mov"], o["codec_key"], o["scale_vf"], o["fps"],
+            grading_params=grading,
+        )
+        def on_done(success, msg):
+            progress.close()
+            if success:
+                QMessageBox.information(self, "Export", msg)
+            else:
+                QMessageBox.warning(self, "Export failed", msg[:2000])
+        self._export_worker.finished_signal.connect(on_done)
+        self._export_worker.start()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MAIN WINDOW
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1266,7 +2450,8 @@ class EXRViewer(QMainWindow):
         
         self.current_info = None
         self.compare_info = None
-        
+        self._grading = {}
+
         self._setup_ui()
     
     def _setup_ui(self):
@@ -1276,24 +2461,45 @@ class EXRViewer(QMainWindow):
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(16)
         
-        # Header
+        # Header (title only; tab-specific actions live in each tab)
         header = QHBoxLayout()
         title = QLabel("EXR ANALYZER")
         title.setFont(QFont('SF Pro Display', 24, QFont.Bold))
         title.setStyleSheet(f"color: {COLORS['text']}; letter-spacing: 2px;")
         header.addWidget(title)
         header.addStretch()
+        main_layout.addLayout(header)
         
+        # Tabs: Analyzer | Sequence
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet(f"""
+            QTabWidget::pane {{ border: 1px solid {COLORS['border']}; border-radius: 8px; background: {COLORS['bg_card']}; }}
+            QTabBar::tab {{ background: {COLORS['bg_light']}; color: {COLORS['text_dim']}; padding: 10px 20px; margin-right: 2px; }}
+            QTabBar::tab:selected {{ background: {COLORS['bg_card']}; color: {COLORS['text']}; font-weight: 600; }}
+            QTabBar::tab:hover:!selected {{ color: {COLORS['accent']}; }}
+        """)
+        
+        # —— Tab 1: Analyzer (current single-file analysis)
+        analyzer_page = QWidget()
+        analyzer_layout = QVBoxLayout(analyzer_page)
+        analyzer_layout.setContentsMargins(0, 0, 0, 0)
+        analyzer_layout.setSpacing(16)
+        
+        analyzer_toolbar = QHBoxLayout()
         self.open_btn = QPushButton("Open EXR")
         self.open_btn.clicked.connect(self.open_file)
-        header.addWidget(self.open_btn)
-        
+        analyzer_toolbar.addWidget(self.open_btn)
         self.compare_btn = QPushButton("Compare")
         self.compare_btn.clicked.connect(self.open_compare_file)
         self.compare_btn.setEnabled(False)
-        header.addWidget(self.compare_btn)
-        
-        main_layout.addLayout(header)
+        analyzer_toolbar.addWidget(self.compare_btn)
+        self.export_frame_btn = QPushButton("Export frame…")
+        self.export_frame_btn.clicked.connect(self._export_current_frame)
+        self.export_frame_btn.setEnabled(False)
+        self.export_frame_btn.setToolTip("Export current EXR to ProRes / cinema format (1 frame)")
+        analyzer_toolbar.addWidget(self.export_frame_btn)
+        analyzer_toolbar.addStretch()
+        analyzer_layout.addLayout(analyzer_toolbar)
         
         # Main content splitter
         splitter = QSplitter(Qt.Horizontal)
@@ -1304,9 +2510,13 @@ class EXRViewer(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(12)
         
-        # Bento split: Image 50%, Waveform 25%, Histogram 25%
+        # Bento split: Image (or LUT compare) 50%, Waveform 25%, Histogram 25%
+        self.analyzer_preview_stack = QStackedWidget()
         self.image_panel = VisualizationPanel("Image Preview", ImagePreviewWidget, self)
-        left_layout.addWidget(self.image_panel, stretch=2)
+        self.analyzer_preview_stack.addWidget(self.image_panel)
+        self.analyzer_compare_widget = SplitComparisonWidget(self)
+        self.analyzer_preview_stack.addWidget(self.analyzer_compare_widget)
+        left_layout.addWidget(self.analyzer_preview_stack, stretch=2)
         
         self.waveform_panel = VisualizationPanel("Waveform", WaveformWidget, self)
         left_layout.addWidget(self.waveform_panel, stretch=1)
@@ -1316,11 +2526,19 @@ class EXRViewer(QMainWindow):
         
         splitter.addWidget(left_panel)
         
-        # Right side: Stats
+        # Right side: Grading + Stats
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(12)
+        
+        self.grading_panel = GradingPanel(self)
+        self.grading_panel.grading_changed.connect(self._on_analyzer_grading_changed)
+        right_layout.addWidget(self.grading_panel)
+        self.analyzer_lut_panel = LUTPanel(self)
+        self.analyzer_lut_panel.lut_changed.connect(self._on_analyzer_lut_changed)
+        right_layout.addWidget(self.analyzer_lut_panel)
+        self._grading = self.grading_panel.get_grading()
         
         # File info
         file_group = QGroupBox("FILE INFO")
@@ -1392,10 +2610,17 @@ class EXRViewer(QMainWindow):
         splitter.addWidget(right_panel)
         splitter.setSizes([900, 500])
         
-        main_layout.addWidget(splitter)
+        analyzer_layout.addWidget(splitter)
+        self.tabs.addTab(analyzer_page, "Analyzer")
+        
+        # —— Tab 2: Sequence (folder load + playback)
+        self.sequence_tab = SequencePlaybackTab(self)
+        self.tabs.addTab(self.sequence_tab, "Sequence")
+        
+        main_layout.addWidget(self.tabs)
         
         # Status bar
-        self.status = QLabel("Ready — Open an EXR file to analyze")
+        self.status = QLabel("Ready — Open an EXR file to analyze, or use Sequence tab to load a folder")
         self.status.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 11px; padding: 8px;")
         main_layout.addWidget(self.status)
     
@@ -1422,6 +2647,7 @@ class EXRViewer(QMainWindow):
             self.current_info = analyze_exr(filepath)
             self.update_display()
             self.compare_btn.setEnabled(True)
+            self.export_frame_btn.setEnabled(True)
             self.status.setText(f"✓ Analyzed: {self.current_info['filename']}")
         except Exception as e:
             self.status.setText(f"✗ Error: {str(e)}")
@@ -1470,10 +2696,43 @@ class EXRViewer(QMainWindow):
                 self.channel_table.setItem(i, 3, QTableWidgetItem(f"{r['mean']:.4f}"))
                 self.channel_table.setItem(i, 4, QTableWidgetItem(f"{r['unique_count']}"))
         
-        # Update visualizations
-        self.image_panel.update_data(info['img_data'])
-        self.waveform_panel.update_data(info['img_data'])
-        self.histogram_panel.update_data(info)
+        # Update visualizations (with grading applied)
+        img = apply_grading(info['img_data'], **self._grading)
+        self._update_analyzer_preview(img)
+        self.waveform_panel.update_data(img)
+        info_graded = {**info, 'img_data': img}
+        self.histogram_panel.update_data(info_graded)
+
+    def _update_analyzer_preview(self, graded_img):
+        """Show single image or LUT comparison in Analyzer tab."""
+        if graded_img is None:
+            self.analyzer_preview_stack.setCurrentIndex(0)
+            self.image_panel.update_data(img_data=None, exposure=0.0)
+            return
+        mode = self.analyzer_lut_panel.get_compare_mode()
+        if mode != "off":
+            left, right, lbl_left, lbl_right = self.analyzer_lut_panel.get_left_right_for_compare(graded_img)
+            self.analyzer_preview_stack.setCurrentIndex(1)
+            self.analyzer_compare_widget.update_comparison(left, right, lbl_left, lbl_right)
+        else:
+            self.analyzer_preview_stack.setCurrentIndex(0)
+            display = self.analyzer_lut_panel.apply_lut_a(graded_img) if self.analyzer_lut_panel.get_lut_a_path() else graded_img
+            self.image_panel.update_data(img_data=display, exposure=0.0)
+
+    def _on_analyzer_grading_changed(self):
+        self._grading = self.grading_panel.get_grading()
+        if not self.current_info:
+            return
+        img = apply_grading(self.current_info['img_data'], **self._grading)
+        self._update_analyzer_preview(img)
+        self.waveform_panel.update_data(img)
+        self.histogram_panel.update_data({**self.current_info, 'img_data': img})
+
+    def _on_analyzer_lut_changed(self):
+        if not self.current_info:
+            return
+        img = apply_grading(self.current_info['img_data'], **self._grading)
+        self._update_analyzer_preview(img)
     
     def update_comparison(self):
         if not self.current_info or not self.compare_info:
@@ -1503,6 +2762,67 @@ class EXRViewer(QMainWindow):
         if abs(diff) > 0.2:
             winner_msg = f"{'File 1' if diff > 0 else 'File 2'} has ~{abs(diff):.1f} more effective bits"
             self.status.setText(f"Comparison: {winner_msg}")
+
+    def _export_current_frame(self):
+        """Export current Analyzer image to ProRes/cinema/MP4 (1 frame)."""
+        if not self.current_info or self.current_info.get("img_data") is None:
+            QMessageBox.warning(self, "Export", "Open an EXR file first.")
+            return
+        if not _find_ffmpeg():
+            QMessageBox.warning(
+                self, "Export",
+                "FFmpeg not found. Install FFmpeg and add it to PATH.\n\n"
+                "See README and IT_PERMISSIONS_REQUEST.md for permissions."
+            )
+            return
+        opts = ExportDialog(self, default_fps=24)
+        if opts.exec_() != QDialog.Accepted:
+            return
+        o = opts.get_options()
+        ext = ".mov" if o["format_mov"] else ".mp4"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export frame to ProRes / Cinema / MP4",
+            "frame" + ext,
+            "QuickTime (*.mov);;MP4 (*.mp4);;All Files (*)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith((".mov", ".mp4")):
+            path = path + ext
+        import tempfile
+        fd, temp_exr = tempfile.mkstemp(suffix=".exr")
+        os.close(fd)
+        img = self.current_info["img_data"]
+        if hasattr(self, "_grading") and self._grading:
+            img = apply_grading(img, **self._grading)
+        if not write_exr_frame(temp_exr, img):
+            try:
+                os.unlink(temp_exr)
+            except Exception:
+                pass
+            QMessageBox.warning(self, "Export", "Could not write temporary EXR.")
+            return
+        progress = QProgressDialog("Exporting…", None, 0, 0, self)
+        progress.setWindowTitle("Export")
+        progress.setMinimumDuration(0)
+        progress.show()
+        worker = ExportWorker(
+            [temp_exr], path,
+            o["format_mov"], o["codec_key"], o["scale_vf"], o["fps"],
+        )
+        def on_done(success, msg):
+            try:
+                os.unlink(temp_exr)
+            except Exception:
+                pass
+            progress.close()
+            if success:
+                QMessageBox.information(self, "Export", msg)
+            else:
+                QMessageBox.warning(self, "Export failed", msg[:2000])
+        worker.finished_signal.connect(on_done)
+        worker.start()
+        self._export_worker = worker
 
 
 # ══════════════════════════════════════════════════════════════════════════════
