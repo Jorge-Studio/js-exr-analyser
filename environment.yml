@@ -1,0 +1,15 @@
+# Conda environment for EXR Analyzer — no admin required, pre-built binaries from conda-forge
+name: exr-analyzer
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.8,<3.13
+  - pyqt
+  - numpy
+  - matplotlib
+  - pillow
+  - pyqtgraph
+  - opencv
+  - openexr
+  - openexr-python

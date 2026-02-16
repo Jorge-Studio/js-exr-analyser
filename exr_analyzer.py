@@ -12,6 +12,8 @@ import os
 import re
 import subprocess
 import traceback
+import json
+import shutil
 
 # Version (single source of truth: VERSION file)
 _ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -120,6 +122,7 @@ try:
         QSplitter, QFrame, QScrollArea, QGroupBox, QGridLayout, QComboBox,
         QProgressBar, QSizePolicy, QDialog, QToolBar, QSlider, QSpinBox,
         QCheckBox, QTabWidget, QStackedWidget, QProgressDialog, QMessageBox, QDoubleSpinBox,
+        QPlainTextEdit,
     )
     from PyQt5.QtCore import Qt, QSize, pyqtSignal, QTimer, QThread
     from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QFont, QPen, QCursor
@@ -132,6 +135,10 @@ try:
     except ImportError:
         os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
         import cv2
+    try:
+        import cv2
+    except ImportError:
+        cv2 = None
     import matplotlib
     matplotlib.use('Qt5Agg')
     from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -772,8 +779,194 @@ def apply_lut_float(rgb_float, lut_table, domain_min, domain_max, strength=1.0):
 
 def _find_ffmpeg():
     """Return path to ffmpeg executable or None."""
-    import shutil
     return shutil.which("ffmpeg")
+
+
+def _find_ffprobe():
+    """Return path to ffprobe executable or None (bundled with ffmpeg)."""
+    return shutil.which("ffprobe")
+
+
+def _parse_fps(r_frame_rate):
+    """Parse r_frame_rate string (e.g. '24/1' or '30000/1001') to float FPS."""
+    if not r_frame_rate:
+        return 24.0
+    try:
+        parts = str(r_frame_rate).split("/")
+        if len(parts) == 2:
+            num, den = float(parts[0]), float(parts[1])
+            return num / den if den else 24.0
+        return float(r_frame_rate)
+    except (ValueError, ZeroDivisionError):
+        return 24.0
+
+
+def _pix_fmt_to_bit_depth(pix_fmt):
+    """Map ffmpeg pixel format to bit depth (8, 10, 12, 16)."""
+    if not pix_fmt:
+        return 8
+    p = str(pix_fmt).lower()
+    if "12" in p or "12le" in p or "12be" in p:
+        return 12
+    if "10" in p or "10le" in p or "10be" in p:
+        return 10
+    if "16" in p or "16le" in p or "16be" in p:
+        return 16
+    return 8
+
+
+def probe_video(filepath):
+    """
+    Probe video file with ffprobe. Returns dict with fps, bit_depth, width, height,
+    codec_name, pix_fmt, duration, nb_frames, and all stream/format metadata.
+    Returns None on error.
+    """
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return None
+    try:
+        cmd = [
+            ffprobe, "-v", "quiet", "-show_format", "-show_streams",
+            "-print_format", "json", filepath
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if proc.returncode != 0:
+            return None
+        data = json.loads(proc.stdout or "{}")
+        video_stream = None
+        for s in data.get("streams", []):
+            if s.get("codec_type") == "video":
+                video_stream = s
+                break
+        if not video_stream:
+            return None
+        fps = _parse_fps(video_stream.get("r_frame_rate"))
+        pix_fmt = video_stream.get("pix_fmt", "")
+        bit_depth = _pix_fmt_to_bit_depth(pix_fmt)
+        duration = float(video_stream.get("duration") or data.get("format", {}).get("duration") or 0)
+        nb_frames = video_stream.get("nb_frames")
+        if nb_frames is not None:
+            try:
+                nb_frames = int(nb_frames)
+            except (ValueError, TypeError):
+                nb_frames = None
+        return {
+            "fps": fps,
+            "bit_depth": bit_depth,
+            "width": int(video_stream.get("width", 0)),
+            "height": int(video_stream.get("height", 0)),
+            "codec_name": video_stream.get("codec_name", ""),
+            "pix_fmt": pix_fmt,
+            "duration": duration,
+            "nb_frames": nb_frames,
+            "profile": video_stream.get("profile", ""),
+            "full_stream": video_stream,
+            "format": data.get("format", {}),
+        }
+    except Exception:
+        return None
+
+
+def analyze_video(filepath):
+    """
+    Analyze a video file: metadata via ffprobe + pixel analysis via OpenCV.
+    Returns dict in same format as analyze_exr for display compatibility.
+    """
+    probe = probe_video(filepath)
+    if not probe or not cv2:
+        raise RuntimeError("Could not probe video. Install FFmpeg (ffprobe) and ensure OpenCV is available.")
+    cap = cv2.VideoCapture(filepath)
+    if not cap.isOpened():
+        raise RuntimeError("Could not open video with OpenCV.")
+    try:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            raise RuntimeError("Could not read first frame.")
+        h, w = frame.shape[:2]
+        if frame.dtype != np.float32 and frame.dtype != np.float64:
+            img = frame.astype(np.float32) / (np.iinfo(frame.dtype).max if frame.dtype.kind in "ui" else 255.0)
+        else:
+            img = frame.astype(np.float32)
+        if img.ndim == 2:
+            img = np.stack([img, img, img], axis=-1)
+        elif img.shape[2] == 1:
+            img = np.repeat(img, 3, axis=2)
+        elif img.shape[2] >= 3:
+            img = img[:, :, :3].copy()
+        img = np.ascontiguousarray(img[:, :, ::-1], dtype=np.float32)
+    finally:
+        cap.release()
+    rgb_channels = ['R', 'G', 'B']
+    results = {}
+    means, maxes = [], []
+    for i, ch in enumerate(rgb_channels):
+        arr = img[:, :, i].flatten()
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            finite = np.array([0.0], dtype=np.float32)
+        unique = np.unique(finite)
+        midtone = unique[(unique > 0.2) & (unique < 0.5)]
+        if len(midtone) > 1:
+            diffs = np.diff(midtone.astype(np.float64))
+            step_ratio = (1.0 / 255) / diffs.mean() if diffs.mean() > 0 else 0
+        else:
+            step_ratio = 0
+        results[ch] = {
+            'unique_count': len(unique),
+            'bit_label': f"{probe['bit_depth']}-bit (pix_fmt)",
+            'ch_type': 'VIDEO',
+            'min': float(np.min(finite)),
+            'max': float(np.max(finite)),
+            'mean': float(np.mean(finite)),
+            'step_ratio': step_ratio,
+            'data': finite,
+        }
+        means.append(results[ch]['mean'])
+        maxes.append(results[ch]['max'])
+    unique_counts = [results[ch]['unique_count'] for ch in rgb_channels]
+    avg_unique = np.mean(unique_counts)
+    eff_bits = math.log2(avg_unique) if avg_unique > 1 else 0
+    all_vals = img.flatten()
+    above_1 = 100 * np.sum(all_vals > 1.0) / max(len(all_vals), 1)
+    if eff_bits >= 13.0:
+        rating = "★★★★★ Cinema-grade"
+    elif eff_bits >= 11.5:
+        rating = "★★★★☆ Good"
+    elif eff_bits >= 10.0:
+        rating = "★★★☆☆ Acceptable"
+    elif eff_bits >= 8.5:
+        rating = "★★☆☆☆ Poor"
+    else:
+        rating = "★☆☆☆☆ 8-bit equivalent"
+    avg_step_ratio = np.mean([results[ch]['step_ratio'] for ch in rgb_channels])
+    fsize = os.path.getsize(filepath)
+    fmt = probe.get("format", {})
+    return {
+        'filepath': filepath,
+        'filename': os.path.basename(filepath),
+        'width': w,
+        'height': h,
+        'filesize': fsize,
+        'filesize_mb': fsize / 1024 / 1024,
+        'compression': probe.get('codec_name', 'Unknown'),
+        'native_type': f"{probe['bit_depth']}-bit ({probe.get('pix_fmt', '')})",
+        'colorspace': 'Video',
+        'encoding': probe.get('pix_fmt', ''),
+        'eff_bits': eff_bits,
+        'avg_unique': avg_unique,
+        'above_1_pct': above_1,
+        'rating': rating,
+        'results': results,
+        'img_data': img,
+        'avg_step_ratio': avg_step_ratio,
+        'range_min': min(results[ch]['min'] for ch in rgb_channels),
+        'range_max': max(results[ch]['max'] for ch in rgb_channels),
+        'video_metadata': probe,
+        'fps': probe['fps'],
+        'duration': probe.get('duration', 0),
+        'nb_frames': probe.get('nb_frames'),
+    }
+
 
 # Codec presets: (display_name, -c:v value, extra args)
 _EXPORT_CODECS_MOV = [
@@ -2226,6 +2419,235 @@ class GradingPanel(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ORGANIZER TAB — Extract frames from video(s), organized by FPS and bit depth
+# ══════════════════════════════════════════════════════════════════════════════
+
+_VIDEO_EXTENSIONS = {'.mov', '.mp4', '.avi', '.mkv', '.mxf', '.webm', '.m4v'}
+
+
+def _extract_frames_ffmpeg(video_path, output_dir, frame_prefix, format_ext):
+    """Extract all frames from video using ffmpeg. Returns (success, frame_count)."""
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
+        return False, 0
+    pattern = os.path.join(output_dir, f"{frame_prefix}_%06d{format_ext}")
+    cmd = [ffmpeg, "-y", "-i", video_path]
+    if format_ext == ".png":
+        cmd.extend(["-pix_fmt", "rgb24", pattern])
+    elif format_ext == ".exr":
+        cmd.extend(["-pix_fmt", "rgba64le", pattern])
+    else:
+        cmd.append(pattern)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        if proc.returncode != 0:
+            return False, 0
+        frames = [f for f in os.listdir(output_dir) if f.startswith(frame_prefix + "_") and f.endswith(format_ext)]
+        return True, len(frames)
+    except Exception:
+        return False, 0
+
+
+class ExtractFramesWorker(QThread):
+    """Background worker to extract all frames from video(s) into image files."""
+    progress_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(bool, str, int)
+
+    def __init__(self, video_paths, output_folder, format_ext=".png", organize_by_fps_bit=True):
+        super().__init__()
+        self.video_paths = video_paths if isinstance(video_paths, list) else [video_paths]
+        self.output_folder = output_folder
+        self.format_ext = format_ext if format_ext.startswith(".") else "." + format_ext
+        self.organize_by_fps_bit = organize_by_fps_bit
+
+    def run(self):
+        try:
+            if not _find_ffmpeg():
+                self.finished_signal.emit(False, "FFmpeg not found. Install FFmpeg and add it to PATH.", 0)
+                return
+            if not _find_ffprobe():
+                self.finished_signal.emit(False, "FFprobe not found. Install FFmpeg and add it to PATH.", 0)
+                return
+            total_frames = 0
+            for path in self.video_paths:
+                if not os.path.isfile(path):
+                    continue
+                self.progress_signal.emit(f"Extracting frames from {os.path.basename(path)}...")
+                probe = probe_video(path)
+                fps = 24
+                bit_depth = 8
+                if probe:
+                    fps = probe['fps']
+                    bit_depth = probe['bit_depth']
+                base_name = os.path.splitext(os.path.basename(path))[0]
+                base_name = re.sub(r'[<>:"/\\|?*]', '_', base_name)
+                if self.organize_by_fps_bit:
+                    fps_folder = f"{int(round(fps))}fps"
+                    bit_folder = f"{bit_depth}bit"
+                    dest_dir = os.path.join(self.output_folder, fps_folder, bit_folder, base_name)
+                else:
+                    dest_dir = os.path.join(self.output_folder, base_name)
+                os.makedirs(dest_dir, exist_ok=True)
+                ok, count = _extract_frames_ffmpeg(path, dest_dir, "frame", self.format_ext)
+                if ok:
+                    total_frames += count
+            self.finished_signal.emit(
+                True,
+                f"Extracted {total_frames} frames from {len(self.video_paths)} video(s) into {self.output_folder}",
+                total_frames
+            )
+        except Exception as e:
+            self.finished_signal.emit(False, str(e)[:500], 0)
+
+
+class OrganizerTab(QWidget):
+    """Tab to extract frames from video(s), organized by FPS and bit depth."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(STYLESHEET)
+        self._worker = None
+        self._video_paths = []
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(16)
+        grp = QGroupBox("Extract Frames from Video")
+        grp.setStyleSheet("QGroupBox { font-weight: 600; }")
+        gl = QVBoxLayout(grp)
+        gl.addWidget(QLabel(
+            "Select a video file (or folder of videos). All frames will be extracted as images\n"
+            "and saved into subfolders by frame rate (e.g. 24fps) and bit depth (e.g. 8bit)."
+        ))
+        gl.addWidget(QLabel("Video(s):"))
+        row1 = QHBoxLayout()
+        self.input_edit = QLabel("No video selected")
+        self.input_edit.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 12px;")
+        self.input_edit.setWordWrap(True)
+        row1.addWidget(self.input_edit, 1)
+        self.pick_video_btn = QPushButton("Select video…")
+        self.pick_video_btn.clicked.connect(self._pick_video)
+        row1.addWidget(self.pick_video_btn)
+        self.pick_folder_btn = QPushButton("Select folder…")
+        self.pick_folder_btn.clicked.connect(self._pick_folder)
+        row1.addWidget(self.pick_folder_btn)
+        gl.addLayout(row1)
+        gl.addWidget(QLabel("Output folder (frames will be saved here):"))
+        row2 = QHBoxLayout()
+        self.output_edit = QLabel("No folder selected")
+        self.output_edit.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 12px;")
+        self.output_edit.setWordWrap(True)
+        row2.addWidget(self.output_edit, 1)
+        self.output_btn = QPushButton("Browse…")
+        self.output_btn.clicked.connect(self._pick_output)
+        row2.addWidget(self.output_btn)
+        gl.addLayout(row2)
+        opts = QHBoxLayout()
+        self.organize_cb = QCheckBox("Organize by FPS / bit depth (e.g. 24fps/8bit/videoname/)")
+        self.organize_cb.setChecked(True)
+        opts.addWidget(self.organize_cb)
+        opts.addWidget(QLabel("Format:"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItem("PNG", ".png")
+        self.format_combo.addItem("EXR", ".exr")
+        opts.addWidget(self.format_combo)
+        opts.addStretch()
+        gl.addLayout(opts)
+        self.run_btn = QPushButton("Extract Frames")
+        self.run_btn.clicked.connect(self._run_extract)
+        self.run_btn.setEnabled(False)
+        gl.addWidget(self.run_btn)
+        self.progress_label = QLabel("")
+        self.progress_label.setStyleSheet(f"color: {COLORS['text_dim']};")
+        gl.addWidget(self.progress_label)
+        layout.addWidget(grp)
+        layout.addStretch()
+
+    def _pick_video(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select video file(s)", "",
+            "Video files (*.mov *.mp4 *.avi *.mkv *.mxf *.webm *.m4v);;All files (*)"
+        )
+        if paths:
+            self._video_paths = paths
+            if len(paths) == 1:
+                self.input_edit.setText(paths[0])
+            else:
+                self.input_edit.setText(f"{len(paths)} videos selected")
+            self._update_run_btn()
+
+    def _pick_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select folder with videos", "")
+        if folder:
+            paths = []
+            for name in os.listdir(folder):
+                ext = os.path.splitext(name)[1].lower()
+                if ext in _VIDEO_EXTENSIONS:
+                    paths.append(os.path.join(folder, name))
+            if paths:
+                self._video_paths = paths
+                self.input_edit.setText(f"{folder} ({len(paths)} videos)")
+                self._update_run_btn()
+            else:
+                QMessageBox.warning(self, "Extract Frames", "No video files found in that folder.")
+
+    def _pick_output(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select output folder", "")
+        if folder:
+            self._output_folder = folder
+            self.output_edit.setText(folder)
+            self._update_run_btn()
+
+    def _update_run_btn(self):
+        has_input = len(self._video_paths) > 0
+        has_output = hasattr(self, '_output_folder') and self._output_folder
+        self.run_btn.setEnabled(bool(has_input and has_output))
+
+    def _run_extract(self):
+        if not self._video_paths:
+            QMessageBox.warning(self, "Extract Frames", "Select a video (or folder of videos) first.")
+            return
+        if not hasattr(self, '_output_folder') or not self._output_folder:
+            QMessageBox.warning(self, "Extract Frames", "Select an output folder first.")
+            return
+        if not _find_ffmpeg():
+            QMessageBox.warning(
+                self, "Extract Frames",
+                "FFmpeg not found. Install FFmpeg and add it to PATH."
+            )
+            return
+        progress = QProgressDialog("Extracting frames…", None, 0, 0, self)
+        progress.setWindowTitle("Extract Frames")
+        progress.setMinimumDuration(0)
+        progress.show()
+        fmt = self.format_combo.currentData()
+        self._worker = ExtractFramesWorker(
+            self._video_paths,
+            self._output_folder,
+            format_ext=fmt,
+            organize_by_fps_bit=self.organize_cb.isChecked(),
+        )
+
+        def on_progress(msg):
+            progress.setLabelText(msg)
+            QApplication.processEvents()
+
+        def on_done(success, msg, count):
+            progress.close()
+            self.progress_label.setText(msg)
+            if success:
+                QMessageBox.information(self, "Extract Frames", msg)
+            else:
+                QMessageBox.warning(self, "Extract Frames", msg)
+
+        self._worker.progress_signal.connect(on_progress)
+        self._worker.finished_signal.connect(on_done)
+        self._worker.start()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SEQUENCE PLAYBACK TAB (EXR folder playback; inspired by Grizzly Peak 3D / DJV)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2531,7 +2953,7 @@ class EXRViewer(QMainWindow):
         header.addStretch()
         main_layout.addLayout(header)
         
-        # Tabs: Analyzer | Sequence
+        # Tabs: Organizer | Analyzer | Sequence
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet(f"""
             QTabWidget::pane {{ border: 1px solid {COLORS['border']}; border-radius: 8px; background: {COLORS['bg_card']}; }}
@@ -2550,6 +2972,10 @@ class EXRViewer(QMainWindow):
         self.open_btn = QPushButton("Open EXR")
         self.open_btn.clicked.connect(self.open_file)
         analyzer_toolbar.addWidget(self.open_btn)
+        self.open_video_btn = QPushButton("Open Video")
+        self.open_video_btn.clicked.connect(self.open_video_file)
+        self.open_video_btn.setToolTip("Analyze video: metadata, bit depth, waveform, histogram")
+        analyzer_toolbar.addWidget(self.open_video_btn)
         self.compare_btn = QPushButton("Compare")
         self.compare_btn.clicked.connect(self.open_compare_file)
         self.compare_btn.setEnabled(False)
@@ -2634,6 +3060,32 @@ class EXRViewer(QMainWindow):
             self.quality_labels[key] = val
         right_layout.addWidget(quality_group)
         
+        # Video metadata (shown only when analyzing video)
+        self.video_metadata_group = QGroupBox("VIDEO METADATA")
+        self.video_metadata_group.setStyleSheet("QGroupBox { font-weight: 600; }")
+        video_md_layout = QGridLayout(self.video_metadata_group)
+        self.video_md_labels = {}
+        video_md_fields = [
+            ('FPS', 'fps'), ('Duration', 'duration'), ('Frames', 'nb_frames'),
+            ('Codec', 'codec_name'), ('Profile', 'profile'), ('Pixel Format', 'pix_fmt'),
+        ]
+        for i, (label, key) in enumerate(video_md_fields):
+            lbl = QLabel(label)
+            lbl.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 11px;")
+            val = QLabel("—")
+            val.setStyleSheet(f"color: {COLORS['text']}; font-size: 12px;")
+            video_md_layout.addWidget(lbl, i // 2, (i % 2) * 2)
+            video_md_layout.addWidget(val, i // 2, (i % 2) * 2 + 1)
+            self.video_md_labels[key] = val
+        video_md_layout.addWidget(QLabel("Full metadata (JSON):"), 3, 0, 1, 2)
+        self.video_full_metadata = QPlainTextEdit()
+        self.video_full_metadata.setReadOnly(True)
+        self.video_full_metadata.setMaximumHeight(120)
+        self.video_full_metadata.setStyleSheet(f"font-family: monospace; font-size: 10px; color: {COLORS['text_dim']};")
+        video_md_layout.addWidget(self.video_full_metadata, 4, 0, 1, 2)
+        self.video_metadata_group.hide()
+        right_layout.addWidget(self.video_metadata_group)
+        
         # Channel details
         channel_group = QGroupBox("CHANNEL ANALYSIS")
         channel_layout = QVBoxLayout(channel_group)
@@ -2660,16 +3112,22 @@ class EXRViewer(QMainWindow):
         splitter.setSizes([900, 500])
         
         analyzer_layout.addWidget(splitter)
+        
+        # —— Tab 1: Organizer (folder by FPS/bit depth)
+        self.organizer_tab = OrganizerTab(self)
+        self.tabs.addTab(self.organizer_tab, "Organizer")
+        
+        # —— Tab 2: Analyzer (single-file analysis)
         self.tabs.addTab(analyzer_page, "Analyzer")
         
-        # —— Tab 2: Sequence (folder load + playback)
+        # —— Tab 3: Sequence (folder load + playback)
         self.sequence_tab = SequencePlaybackTab(self)
         self.tabs.addTab(self.sequence_tab, "Sequence")
         
         main_layout.addWidget(self.tabs)
         
         # Status bar
-        self.status = QLabel("Ready — Open an EXR file to analyze, or use Sequence tab to load a folder")
+        self.status = QLabel("Ready — Open EXR/Video to analyze, Organizer to sort by FPS/bit depth, or Sequence for playback")
         self.status.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 11px; padding: 8px;")
         main_layout.addWidget(self.status)
     
@@ -2679,6 +3137,14 @@ class EXRViewer(QMainWindow):
         )
         if filepath:
             self.analyze_file(filepath)
+
+    def open_video_file(self):
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Open Video File", "",
+            "Video Files (*.mov *.mp4 *.avi *.mkv *.mxf *.webm *.m4v);;All Files (*)"
+        )
+        if filepath:
+            self.analyze_video_file(filepath)
     
     def open_compare_file(self):
         filepath, _ = QFileDialog.getOpenFileName(
@@ -2698,6 +3164,19 @@ class EXRViewer(QMainWindow):
             self.compare_btn.setEnabled(True)
             self.export_frame_btn.setEnabled(True)
             self.status.setText(f"✓ Analyzed: {self.current_info['filename']}")
+        except Exception as e:
+            self.status.setText(f"✗ Error: {str(e)}")
+
+    def analyze_video_file(self, filepath):
+        self.status.setText(f"Analyzing video {os.path.basename(filepath)}...")
+        QApplication.processEvents()
+        
+        try:
+            self.current_info = analyze_video(filepath)
+            self.update_display()
+            self.compare_btn.setEnabled(False)
+            self.export_frame_btn.setEnabled(False)
+            self.status.setText(f"✓ Analyzed video: {self.current_info['filename']}")
         except Exception as e:
             self.status.setText(f"✗ Error: {str(e)}")
     
@@ -2733,6 +3212,26 @@ class EXRViewer(QMainWindow):
         else:
             color = COLORS['error']
         self.quality_labels['rating'].setStyleSheet(f"color: {color}; font-size: 13px; font-weight: 600;")
+        
+        # Video metadata (show only for video)
+        if info.get('video_metadata'):
+            vm = info['video_metadata']
+            self.video_metadata_group.show()
+            self.video_md_labels['fps'].setText(f"{info.get('fps', vm.get('fps', 0)):.2f}")
+            dur = info.get('duration', vm.get('duration', 0))
+            self.video_md_labels['duration'].setText(f"{dur:.2f} s" if dur else "—")
+            nb = info.get('nb_frames') or vm.get('nb_frames')
+            self.video_md_labels['nb_frames'].setText(str(nb) if nb is not None else "—")
+            self.video_md_labels['codec_name'].setText(vm.get('codec_name', '—'))
+            self.video_md_labels['profile'].setText(vm.get('profile', '—') or "—")
+            self.video_md_labels['pix_fmt'].setText(vm.get('pix_fmt', '—'))
+            full = {
+                'stream': vm.get('full_stream', {}),
+                'format': vm.get('format', {}),
+            }
+            self.video_full_metadata.setPlainText(json.dumps(full, indent=2))
+        else:
+            self.video_metadata_group.hide()
         
         # Update channel table
         self.channel_table.setRowCount(3)
