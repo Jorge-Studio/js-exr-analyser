@@ -4,6 +4,7 @@ import Button from '@mui/material/Button'
 import Typography from '@mui/material/Typography'
 import Grid from '@mui/material/Grid'
 import Alert from '@mui/material/Alert'
+import Divider from '@mui/material/Divider'
 import CircularProgress from '@mui/material/CircularProgress'
 import Table from '@mui/material/Table'
 import TableBody from '@mui/material/TableBody'
@@ -164,7 +165,7 @@ function ZoomableImage({ src, alt, maxHeight }: { src: string; alt: string; maxH
 
 // ── Zoomable Chart wrapper ──────────────────────────────────────────
 
-function ZoomableWaveformChart({ data, channels }: { data: AnalysisResult['waveform']; channels: { R: boolean; G: boolean; B: boolean } }) {
+function ZoomableWaveformChart({ data, channels, height = 160 }: { data: AnalysisResult['waveform']; channels: { R: boolean; G: boolean; B: boolean }; height?: number | `${number}%` }) {
   const chartData = data.positions.map((pos, i) => ({
     pos: pos * 1000,
     R_mean: data.R[i]?.mean ?? 0, R_max: data.R[i]?.max ?? 0,
@@ -198,7 +199,7 @@ function ZoomableWaveformChart({ data, channels }: { data: AnalysisResult['wavef
 
   return (
     <Box sx={{ position: 'relative' }}>
-      <ResponsiveContainer width="100%" height={160}>
+      <ResponsiveContainer width="100%" height={height}>
         <AreaChart data={chartData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}
           onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp}
         >
@@ -224,7 +225,7 @@ function ZoomableWaveformChart({ data, channels }: { data: AnalysisResult['wavef
   )
 }
 
-function ZoomableHistogramChart({ data, channels }: { data: AnalysisResult['histogram']; channels: { R: boolean; G: boolean; B: boolean } }) {
+function ZoomableHistogramChart({ data, channels, height = 160 }: { data: AnalysisResult['histogram']; channels: { R: boolean; G: boolean; B: boolean }; height?: number | `${number}%` }) {
   const chartData = data.bin_centers.map((v, i) => ({
     value: Math.round(v * 100) / 100, R: data.R[i] ?? 0, G: data.G[i] ?? 0, B: data.B[i] ?? 0,
   }))
@@ -255,7 +256,7 @@ function ZoomableHistogramChart({ data, channels }: { data: AnalysisResult['hist
 
   return (
     <Box sx={{ position: 'relative' }}>
-      <ResponsiveContainer width="100%" height={160}>
+      <ResponsiveContainer width="100%" height={height}>
         <AreaChart data={chartData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}
           onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp}
         >
@@ -521,93 +522,196 @@ export default function Analyzer() {
   const thCh = (c: 'R' | 'G' | 'B') => setHCh(p => ({ ...p, [c]: !p[c] }))
   const r = result
 
-  // Section content builders for reuse in fullscreen
-  const sectionContent: Record<string, React.ReactNode> = {
-    preview: r?.preview_b64 ? (
-      <ZoomableImage src={`data:image/jpeg;base64,${r.preview_b64}`} alt="Preview" maxHeight={fullscreenSection === 'preview' ? undefined : 280} />
-    ) : (
-      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: 200, bgcolor: '#080808', borderRadius: '2px', cursor: 'pointer' }} component="label">
-        <ImageIcon sx={{ fontSize: 36, color: '#2A2A2A', mb: 1 }} />
-        <Typography sx={{ color: '#444', fontSize: 12 }}>Open a file to preview</Typography>
-        <input type="file" hidden accept=".exr,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.mov,.mp4,.avi,.mkv,.mxf,.webm,.m4v,.mpg,.mpeg" onChange={handleFile} />
-      </Box>
-    ),
-    waveform: (
-      <>
-        <ChToggles ch={wCh} onChange={twCh} showFull />
-        {r?.waveform ? (
-          <ZoomableWaveformChart data={r.waveform} channels={wCh} />
+  // Section content builder — `fs` = is fullscreen
+  const buildSectionContent = (sectionId: string, fs: boolean): React.ReactNode => {
+    const cr = compareResult
+    const hasCompare = !!cr
+    const chartH: number | `${number}%` = fs ? '100%' : 160
+
+    const fileLabel = (res: AnalysisResult) => {
+      const ext = res.filename.split('.').pop()?.toUpperCase() ?? ''
+      return `${res.filename} (${ext})`
+    }
+
+    switch (sectionId) {
+      case 'preview':
+        return r?.preview_b64 ? (
+          <ZoomableImage src={`data:image/jpeg;base64,${r.preview_b64}`} alt="Preview" maxHeight={fs ? undefined : 280} />
         ) : (
-          <Box sx={{ height: 130, bgcolor: '#080808', borderRadius: '2px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Typography sx={{ color: '#333', fontSize: 11 }}>No data</Typography>
+          <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: 200, bgcolor: '#080808', borderRadius: '2px', cursor: 'pointer' }} component="label">
+            <ImageIcon sx={{ fontSize: 36, color: '#2A2A2A', mb: 1 }} />
+            <Typography sx={{ color: '#444', fontSize: 12 }}>Open a file to preview</Typography>
+            <input type="file" hidden accept=".exr,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.mov,.mp4,.avi,.mkv,.mxf,.webm,.m4v,.mpg,.mpeg" onChange={handleFile} />
           </Box>
-        )}
-        <Typography sx={{ color: '#444', textAlign: 'center', fontSize: 9, mt: 0.5 }}>Drag to zoom — Frame Position (×0.001)</Typography>
-      </>
-    ),
-    histogram: (
-      <>
-        <ChToggles ch={hCh} onChange={thCh} />
-        {r?.histogram ? (
-          <ZoomableHistogramChart data={r.histogram} channels={hCh} />
+        )
+      case 'waveform':
+        if (hasCompare && r?.waveform && cr?.waveform) {
+          return (
+            <Box sx={{ display: 'flex', flexDirection: 'column', height: fs ? '100%' : 'auto', gap: 1 }}>
+              <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                <Typography sx={{ color: C.yellow, fontSize: 10, fontWeight: 700, letterSpacing: 1, mb: 0.5 }}>{fileLabel(r)}</Typography>
+                <ChToggles ch={wCh} onChange={twCh} showFull />
+                <Box sx={{ flex: 1, minHeight: 0 }}>
+                  <ZoomableWaveformChart data={r.waveform} channels={wCh} height={fs ? '100%' : 130} />
+                </Box>
+              </Box>
+              <Divider sx={{ borderColor: '#333' }} />
+              <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                <Typography sx={{ color: '#88AAFF', fontSize: 10, fontWeight: 700, letterSpacing: 1, mb: 0.5 }}>{fileLabel(cr)}</Typography>
+                <ChToggles ch={wCh} onChange={twCh} showFull />
+                <Box sx={{ flex: 1, minHeight: 0 }}>
+                  <ZoomableWaveformChart data={cr.waveform} channels={wCh} height={fs ? '100%' : 130} />
+                </Box>
+              </Box>
+            </Box>
+          )
+        }
+        return (
+          <Box sx={{ display: 'flex', flexDirection: 'column', height: fs ? '100%' : 'auto' }}>
+            <ChToggles ch={wCh} onChange={twCh} showFull />
+            {r?.waveform ? (
+              <Box sx={{ flex: 1, minHeight: 0 }}>
+                <ZoomableWaveformChart data={r.waveform} channels={wCh} height={chartH} />
+              </Box>
+            ) : (
+              <Box sx={{ height: 130, bgcolor: '#080808', borderRadius: '2px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Typography sx={{ color: '#333', fontSize: 11 }}>No data</Typography>
+              </Box>
+            )}
+            <Typography sx={{ color: '#444', textAlign: 'center', fontSize: 9, mt: 0.5 }}>Drag to zoom — Frame Position (×0.001)</Typography>
+          </Box>
+        )
+      case 'histogram':
+        if (hasCompare && r?.histogram && cr?.histogram) {
+          return (
+            <Box sx={{ display: 'flex', flexDirection: 'column', height: fs ? '100%' : 'auto', gap: 1 }}>
+              <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                <Typography sx={{ color: C.yellow, fontSize: 10, fontWeight: 700, letterSpacing: 1, mb: 0.5 }}>{fileLabel(r)}</Typography>
+                <ChToggles ch={hCh} onChange={thCh} />
+                <Box sx={{ flex: 1, minHeight: 0 }}>
+                  <ZoomableHistogramChart data={r.histogram} channels={hCh} height={fs ? '100%' : 130} />
+                </Box>
+              </Box>
+              <Divider sx={{ borderColor: '#333' }} />
+              <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                <Typography sx={{ color: '#88AAFF', fontSize: 10, fontWeight: 700, letterSpacing: 1, mb: 0.5 }}>{fileLabel(cr)}</Typography>
+                <ChToggles ch={hCh} onChange={thCh} />
+                <Box sx={{ flex: 1, minHeight: 0 }}>
+                  <ZoomableHistogramChart data={cr.histogram} channels={hCh} height={fs ? '100%' : 130} />
+                </Box>
+              </Box>
+            </Box>
+          )
+        }
+        return (
+          <Box sx={{ display: 'flex', flexDirection: 'column', height: fs ? '100%' : 'auto' }}>
+            <ChToggles ch={hCh} onChange={thCh} />
+            {r?.histogram ? (
+              <Box sx={{ flex: 1, minHeight: 0 }}>
+                <ZoomableHistogramChart data={r.histogram} channels={hCh} height={chartH} />
+              </Box>
+            ) : (
+              <Box sx={{ height: 130, bgcolor: '#080808', borderRadius: '2px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Typography sx={{ color: '#333', fontSize: 11 }}>No data</Typography>
+              </Box>
+            )}
+            <Typography sx={{ color: '#444', textAlign: 'center', fontSize: 9, mt: 0.5 }}>Drag to zoom</Typography>
+          </Box>
+        )
+      case 'fileinfo':
+        return hasCompare ? (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <Box>
+              <Typography sx={{ color: C.yellow, fontSize: 10, fontWeight: 700, letterSpacing: 1, mb: 0.5 }}>{fileLabel(r!)}</Typography>
+              <InfoRow label="Resolution" value={r ? `${r.width} × ${r.height}` : '—'} />
+              <InfoRow label="File Size" value={r ? `${r.filesize_mb} MB` : '—'} />
+              <InfoRow label="Compression" value={r?.compression ?? '—'} />
+              <InfoRow label="Bit Depth" value={r?.native_type || '—'} />
+              <InfoRow label="Color Space" value={r?.colorspace || '—'} />
+            </Box>
+            <Divider sx={{ borderColor: '#333' }} />
+            <Box>
+              <Typography sx={{ color: '#88AAFF', fontSize: 10, fontWeight: 700, letterSpacing: 1, mb: 0.5 }}>{fileLabel(cr!)}</Typography>
+              <InfoRow label="Resolution" value={`${cr!.width} × ${cr!.height}`} />
+              <InfoRow label="File Size" value={`${cr!.filesize_mb} MB`} />
+              <InfoRow label="Compression" value={cr!.compression ?? '—'} />
+              <InfoRow label="Bit Depth" value={cr!.native_type || '—'} />
+              <InfoRow label="Color Space" value={cr!.colorspace || '—'} />
+            </Box>
+          </Box>
         ) : (
-          <Box sx={{ height: 130, bgcolor: '#080808', borderRadius: '2px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Typography sx={{ color: '#333', fontSize: 11 }}>No data</Typography>
+          <>
+            <InfoRow label="Filename" value={r?.filename ?? '—'} />
+            <InfoRow label="Resolution" value={r ? `${r.width} × ${r.height}` : '—'} />
+            <InfoRow label="File Size" value={r ? `${r.filesize_mb} MB` : '—'} />
+            <InfoRow label="Compression" value={r?.compression ?? '—'} />
+            <InfoRow label="Bit Depth" value={r?.native_type || '—'} />
+            <InfoRow label="Color Space" value={r?.colorspace || '—'} />
+            <InfoRow label="Encoding" value={r?.encoding ?? '—'} />
+            {r?.fps != null && <InfoRow label="FPS" value={r.fps} />}
+            {r?.duration != null && r.duration > 0 && <InfoRow label="Duration" value={`${r.duration.toFixed(2)}s`} />}
+            {r?.nb_frames != null && <InfoRow label="Frames" value={r.nb_frames} />}
+          </>
+        )
+      case 'quality':
+        return hasCompare ? (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <Box>
+              <Typography sx={{ color: C.yellow, fontSize: 10, fontWeight: 700, letterSpacing: 1, mb: 0.5 }}>{fileLabel(r!)}</Typography>
+              <InfoRow label="Range" value={`${r!.range_min.toFixed(3)} — ${r!.range_max.toFixed(3)}`} />
+              <InfoRow label="Above 1.0" value={`${r!.above_1_pct}%`} />
+              <InfoRow label="Effective Bits" value={`~${r!.eff_bits} bits`} />
+              <InfoRow label="Quality" value={r!.rating} accent />
+            </Box>
+            <Divider sx={{ borderColor: '#333' }} />
+            <Box>
+              <Typography sx={{ color: '#88AAFF', fontSize: 10, fontWeight: 700, letterSpacing: 1, mb: 0.5 }}>{fileLabel(cr!)}</Typography>
+              <InfoRow label="Range" value={`${cr!.range_min.toFixed(3)} — ${cr!.range_max.toFixed(3)}`} />
+              <InfoRow label="Above 1.0" value={`${cr!.above_1_pct}%`} />
+              <InfoRow label="Effective Bits" value={`~${cr!.eff_bits} bits`} />
+              <InfoRow label="Quality" value={cr!.rating} accent />
+            </Box>
           </Box>
-        )}
-        <Typography sx={{ color: '#444', textAlign: 'center', fontSize: 9, mt: 0.5 }}>Drag to zoom</Typography>
-      </>
-    ),
-    fileinfo: (
-      <>
-        <InfoRow label="Filename" value={r?.filename ?? '—'} />
-        <InfoRow label="Resolution" value={r ? `${r.width} × ${r.height}` : '—'} />
-        <InfoRow label="File Size" value={r ? `${r.filesize_mb} MB` : '—'} />
-        <InfoRow label="Compression" value={r?.compression ?? '—'} />
-        <InfoRow label="Bit Depth" value={r?.native_type || '—'} />
-        <InfoRow label="Color Space" value={r?.colorspace || '—'} />
-        <InfoRow label="Encoding" value={r?.encoding ?? '—'} />
-        {r?.fps != null && <InfoRow label="FPS" value={r.fps} />}
-        {r?.duration != null && r.duration > 0 && <InfoRow label="Duration" value={`${r.duration.toFixed(2)}s`} />}
-        {r?.nb_frames != null && <InfoRow label="Frames" value={r.nb_frames} />}
-      </>
-    ),
-    quality: (
-      <>
-        <InfoRow label="Range" value={r ? `${r.range_min.toFixed(3)} — ${r.range_max.toFixed(3)}` : '—'} />
-        <InfoRow label="Above 1.0" value={r ? `${r.above_1_pct}%` : '—'} />
-        <InfoRow label="Unique Values" value={r ? Math.round(r.avg_unique).toLocaleString() : '—'} />
-        <InfoRow label="Midtone Step" value={r ? `${r.avg_step_ratio}× finer than 8-bit` : '—'} />
-        <InfoRow label="Effective Bits" value={r ? `~${r.eff_bits} bits` : '—'} />
-        <InfoRow label="Quality" value={r?.rating ?? '—'} accent={!!r} />
-      </>
-    ),
-    channels: (
-      <Table size="small" sx={{ '& td, & th': { py: 0.35, px: 0.75, fontSize: 11, borderColor: '#1A1A1A' } }}>
-        <TableHead>
-          <TableRow>
-            {['CHANNEL', 'MIN', 'MAX', 'MEAN', 'UNIQUE'].map(h => (
-              <TableCell key={h} align={h === 'CHANNEL' ? 'left' : 'right'} sx={{ color: C.dim, fontWeight: 700, fontSize: '10px !important' }}>{h}</TableCell>
-            ))}
-          </TableRow>
-        </TableHead>
-        <TableBody>
-          {(['R', 'G', 'B'] as const).map(ch => {
-            const d = r?.results[ch]
-            const color = ch === 'R' ? C.red : ch === 'G' ? C.green : C.blue
-            return (
-              <TableRow key={ch}>
-                <TableCell sx={{ color, fontWeight: 700 }}>{ch}</TableCell>
-                <TableCell align="right">{d ? d.min.toFixed(4) : '—'}</TableCell>
-                <TableCell align="right">{d ? d.max.toFixed(4) : '—'}</TableCell>
-                <TableCell align="right">{d ? d.mean.toFixed(4) : '—'}</TableCell>
-                <TableCell align="right">{d ? d.unique_count.toLocaleString() : '—'}</TableCell>
+        ) : (
+          <>
+            <InfoRow label="Range" value={r ? `${r.range_min.toFixed(3)} — ${r.range_max.toFixed(3)}` : '—'} />
+            <InfoRow label="Above 1.0" value={r ? `${r.above_1_pct}%` : '—'} />
+            <InfoRow label="Unique Values" value={r ? Math.round(r.avg_unique).toLocaleString() : '—'} />
+            <InfoRow label="Midtone Step" value={r ? `${r.avg_step_ratio}× finer than 8-bit` : '—'} />
+            <InfoRow label="Effective Bits" value={r ? `~${r.eff_bits} bits` : '—'} />
+            <InfoRow label="Quality" value={r?.rating ?? '—'} accent={!!r} />
+          </>
+        )
+      case 'channels':
+        return (
+          <Table size="small" sx={{ '& td, & th': { py: 0.35, px: 0.75, fontSize: 11, borderColor: '#1A1A1A' } }}>
+            <TableHead>
+              <TableRow>
+                {['CHANNEL', 'MIN', 'MAX', 'MEAN', 'UNIQUE'].map(h => (
+                  <TableCell key={h} align={h === 'CHANNEL' ? 'left' : 'right'} sx={{ color: C.dim, fontWeight: 700, fontSize: '10px !important' }}>{h}</TableCell>
+                ))}
               </TableRow>
-            )
-          })}
-        </TableBody>
-      </Table>
-    ),
+            </TableHead>
+            <TableBody>
+              {(['R', 'G', 'B'] as const).map(ch => {
+                const d = r?.results[ch]
+                const color = ch === 'R' ? C.red : ch === 'G' ? C.green : C.blue
+                return (
+                  <TableRow key={ch}>
+                    <TableCell sx={{ color, fontWeight: 700 }}>{ch}</TableCell>
+                    <TableCell align="right">{d ? d.min.toFixed(4) : '—'}</TableCell>
+                    <TableCell align="right">{d ? d.max.toFixed(4) : '—'}</TableCell>
+                    <TableCell align="right">{d ? d.mean.toFixed(4) : '—'}</TableCell>
+                    <TableCell align="right">{d ? d.unique_count.toLocaleString() : '—'}</TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        )
+      default:
+        return null
+    }
   }
 
   const sectionTitles: Record<string, string> = {
@@ -655,25 +759,25 @@ export default function Analyzer() {
       <Grid container spacing={1}>
         <Grid item xs={12} md={7}>
           <Section title="IMAGE PREVIEW" sectionId="preview" hiddenSections={hiddenSections} onToggleHide={toggleHide} onFullscreen={setFullscreenSection}>
-            {sectionContent.preview}
+            {buildSectionContent('preview', false)}
           </Section>
           <Section title="WAVEFORM" sectionId="waveform" hiddenSections={hiddenSections} onToggleHide={toggleHide} onFullscreen={setFullscreenSection}>
-            {sectionContent.waveform}
+            {buildSectionContent('waveform', false)}
           </Section>
           <Section title="HISTOGRAM" sectionId="histogram" hiddenSections={hiddenSections} onToggleHide={toggleHide} onFullscreen={setFullscreenSection}>
-            {sectionContent.histogram}
+            {buildSectionContent('histogram', false)}
           </Section>
         </Grid>
 
         <Grid item xs={12} md={5}>
           <Section title="FILE INFO" sectionId="fileinfo" hiddenSections={hiddenSections} onToggleHide={toggleHide} onFullscreen={setFullscreenSection}>
-            {sectionContent.fileinfo}
+            {buildSectionContent('fileinfo', false)}
           </Section>
           <Section title="QUALITY METRICS" sectionId="quality" hiddenSections={hiddenSections} onToggleHide={toggleHide} onFullscreen={setFullscreenSection}>
-            {sectionContent.quality}
+            {buildSectionContent('quality', false)}
           </Section>
           <Section title="CHANNEL ANALYSIS" sectionId="channels" hiddenSections={hiddenSections} onToggleHide={toggleHide} onFullscreen={setFullscreenSection}>
-            {sectionContent.channels}
+            {buildSectionContent('channels', false)}
           </Section>
         </Grid>
       </Grid>
@@ -693,8 +797,10 @@ export default function Analyzer() {
           </Typography>
           <IconButton onClick={() => setFullscreenSection(null)} sx={{ color: '#888' }}><CloseIcon /></IconButton>
         </Box>
-        <DialogContent sx={{ bgcolor: '#111', p: 2, overflow: 'auto' }}>
-          {fullscreenSection && sectionContent[fullscreenSection]}
+        <DialogContent sx={{ bgcolor: '#111', p: 2, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
+          <Box sx={{ flex: 1, minHeight: 0 }}>
+            {fullscreenSection && buildSectionContent(fullscreenSection, true)}
+          </Box>
         </DialogContent>
       </Dialog>
 
