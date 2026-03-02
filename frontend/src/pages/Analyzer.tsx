@@ -487,7 +487,7 @@ export default function Analyzer() {
     if (!result) return
     const input = document.createElement('input')
     input.type = 'file'
-    input.accept = '.exr,.mov,.mp4,.avi,.mkv,.mxf,.webm,.m4v,.mpg,.mpeg'
+    input.accept = '.exr,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.mov,.mp4,.avi,.mkv,.mxf,.webm,.m4v,.mpg,.mpeg'
     input.onchange = async () => {
       const f = input.files?.[0]
       if (!f) return
@@ -529,7 +529,7 @@ export default function Analyzer() {
       <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: 200, bgcolor: '#080808', borderRadius: '2px', cursor: 'pointer' }} component="label">
         <ImageIcon sx={{ fontSize: 36, color: '#2A2A2A', mb: 1 }} />
         <Typography sx={{ color: '#444', fontSize: 12 }}>Open a file to preview</Typography>
-        <input type="file" hidden accept=".exr,.mov,.mp4,.avi,.mkv,.mxf,.webm,.m4v,.mpg,.mpeg" onChange={handleFile} />
+        <input type="file" hidden accept=".exr,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.mov,.mp4,.avi,.mkv,.mxf,.webm,.m4v,.mpg,.mpeg" onChange={handleFile} />
       </Box>
     ),
     waveform: (
@@ -623,7 +623,7 @@ export default function Analyzer() {
           Open EXR<input type="file" hidden accept=".exr" onChange={handleFile} />
         </Button>
         <Button variant="contained" size="small" component="label" startIcon={<MovieIcon />} sx={{ fontWeight: 700, fontSize: 11, px: 2 }}>
-          Open Video<input type="file" hidden accept=".mov,.mp4,.avi,.mkv,.mxf,.webm,.m4v,.mpg,.mpeg" onChange={handleFile} />
+          Open Image/Video<input type="file" hidden accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp,.mov,.mp4,.avi,.mkv,.mxf,.webm,.m4v,.mpg,.mpeg" onChange={handleFile} />
         </Button>
         <Button variant="outlined" size="small" startIcon={<CompareIcon />}
           disabled={!result || compareLoading}
