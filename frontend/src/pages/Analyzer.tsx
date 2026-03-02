@@ -39,7 +39,40 @@ import {
   Tooltip,
   ReferenceArea,
 } from 'recharts'
+import { upload } from '@vercel/blob/client'
 import { API_BASE } from '../api'
+
+const DIRECT_UPLOAD_LIMIT = 4.5 * 1024 * 1024
+
+async function analyzeFile(f: File): Promise<AnalysisResult> {
+  if (f.size <= DIRECT_UPLOAD_LIMIT) {
+    const form = new FormData()
+    form.append('file', f)
+    const ep = f.name.toLowerCase().endsWith('.exr') ? '/analyze-exr' : '/analyze-video'
+    const res = await fetch(`${API_BASE}${ep}`, { method: 'POST', body: form })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }))
+      throw new Error(err.detail || res.statusText)
+    }
+    return await res.json() as AnalysisResult
+  }
+
+  const blob = await upload(f.name, f, {
+    access: 'public',
+    handleUploadUrl: '/api/upload',
+  })
+
+  const res = await fetch(`${API_BASE}/analyze-blob`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: blob.url, filename: f.name }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || res.statusText)
+  }
+  return await res.json() as AnalysisResult
+}
 
 interface WaveformPoint { min: number; max: number; mean: number }
 interface AnalysisResult {
@@ -445,15 +478,7 @@ export default function Analyzer() {
   const analyze = async (f: File) => {
     setLoading(true); setError(null); setResult(null)
     try {
-      const form = new FormData()
-      form.append('file', f)
-      const ep = f.name.toLowerCase().endsWith('.exr') ? '/analyze-exr' : '/analyze-video'
-      const res = await fetch(`${API_BASE}${ep}`, { method: 'POST', body: form })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: res.statusText }))
-        throw new Error(err.detail || res.statusText)
-      }
-      setResult(await res.json() as AnalysisResult)
+      setResult(await analyzeFile(f))
     } catch (e) { setError(e instanceof Error ? e.message : 'Analysis failed') }
     finally { setLoading(false) }
   }
@@ -468,12 +493,7 @@ export default function Analyzer() {
       if (!f) return
       setCompareLoading(true)
       try {
-        const form = new FormData()
-        form.append('file', f)
-        const ep = f.name.toLowerCase().endsWith('.exr') ? '/analyze-exr' : '/analyze-video'
-        const res = await fetch(`${API_BASE}${ep}`, { method: 'POST', body: form })
-        if (!res.ok) throw new Error('Failed to analyze comparison file')
-        const data = await res.json() as AnalysisResult
+        const data = await analyzeFile(f)
         setCompareResult(data)
         setComparing(true)
       } catch { setError('Compare file analysis failed') }
@@ -623,7 +643,10 @@ export default function Analyzer() {
       {loading && (
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 1.5 }}>
           <CircularProgress size={20} sx={{ color: C.green }} />
-          <Typography sx={{ fontSize: 12, color: C.dim }}>Analyzing {file?.name}…</Typography>
+          <Typography sx={{ fontSize: 12, color: C.dim }}>
+            {file && file.size > DIRECT_UPLOAD_LIMIT ? 'Uploading & analyzing' : 'Analyzing'} {file?.name}…
+            {file && file.size > DIRECT_UPLOAD_LIMIT && <span style={{ color: '#555' }}> ({(file.size / 1024 / 1024).toFixed(0)} MB via Blob)</span>}
+          </Typography>
         </Box>
       )}
       {error && <Alert severity="error" sx={{ mb: 1.5 }}>{error}</Alert>}

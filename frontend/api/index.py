@@ -7,10 +7,12 @@ import io
 import math
 import os
 import tempfile
+import urllib.request
+import json as json_mod
 from pathlib import Path
 
 import numpy as np
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
@@ -259,3 +261,61 @@ async def api_analyze_video(file: UploadFile = File(...)):
             os.unlink(tmp_path)
         except Exception:
             pass
+
+
+def _delete_blob(blob_url: str):
+    """Delete a blob from Vercel Blob storage after analysis."""
+    token = os.environ.get("BLOB_READ_WRITE_TOKEN")
+    if not token or not blob_url:
+        return
+    try:
+        data = json_mod.dumps({"urls": [blob_url]}).encode("utf-8")
+        req = urllib.request.Request(
+            "https://blob.vercel-storage.com/delete",
+            data=data,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "x-api-version": "7",
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
+
+
+@app.post("/api/analyze-blob")
+async def api_analyze_blob(payload: dict = Body(...)):
+    blob_url = payload.get("url", "")
+    filename = payload.get("filename", "file.exr")
+    if not blob_url:
+        raise HTTPException(400, "Missing blob URL")
+
+    ext = Path(filename).suffix.lower()
+    suffix = ext or ".exr"
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp_path = tmp.name
+            urllib.request.urlretrieve(blob_url, tmp_path)
+
+        if ext == ".exr":
+            img = _read_exr(tmp_path)
+            extra = {"compression": "EXR", "native_type": "32-bit float", "colorspace": "Linear / Unknown"}
+        else:
+            img = _read_image_pillow(tmp_path)
+            extra = {"compression": ext.lstrip(".").upper(), "native_type": "8-bit", "colorspace": "sRGB"}
+
+        result = _analyze_image(img, tmp_path, extra)
+        result["filename"] = filename
+        return result
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+        _delete_blob(blob_url)

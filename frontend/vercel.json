@@ -4,11 +4,15 @@
   "outputDirectory": "dist",
   "functions": {
     "api/index.py": {
-      "maxDuration": 60,
+      "maxDuration": 300,
       "memory": 1024
+    },
+    "api/upload.js": {
+      "maxDuration": 60
     }
   },
   "rewrites": [
+    { "source": "/api/upload", "destination": "/api/upload" },
     { "source": "/api/(.*)", "destination": "/api/index.py" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
