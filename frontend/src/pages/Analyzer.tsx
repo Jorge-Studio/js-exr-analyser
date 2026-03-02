@@ -194,7 +194,13 @@ export default function Analyzer() {
     analyze(f)
   }
 
+  const MAX_UPLOAD_MB = 4.5
+
   const analyze = async (f: File) => {
+    if (f.size > MAX_UPLOAD_MB * 1024 * 1024) {
+      setError(`File is ${(f.size / 1024 / 1024).toFixed(1)} MB — exceeds the ${MAX_UPLOAD_MB} MB upload limit for the hosted version. Use the desktop app (run_mac.command) for large files.`)
+      return
+    }
     setLoading(true); setError(null); setResult(null)
     try {
       const form = new FormData()
