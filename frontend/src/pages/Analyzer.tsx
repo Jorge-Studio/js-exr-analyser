@@ -197,27 +197,33 @@ function ZoomableWaveformChart({ data, channels, height = 160 }: { data: Analysi
 
   const resetZoom = () => { setXDomain(null); setYDomain([0, 1.2]) }
 
+  const fill = height === '100%'
+
+  const chart = (
+    <ResponsiveContainer width="100%" height={fill ? '100%' : height}>
+      <AreaChart data={chartData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}
+        onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp}
+      >
+        <CartesianGrid strokeDasharray="3 3" stroke="#1A1A1A" />
+        <XAxis dataKey="pos" domain={xDomain ?? ['dataMin', 'dataMax']} tick={{ fill: '#555', fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#222' }} type="number" allowDataOverflow />
+        <YAxis domain={yDomain} tick={{ fill: '#555', fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#222' }} allowDataOverflow />
+        <Tooltip contentStyle={{ backgroundColor: '#1A1A1A', border: '1px solid #333', borderRadius: 4, fontSize: 10, padding: '4px 8px' }} labelStyle={{ color: '#888' }} />
+        {channels.R && <><Area type="monotone" dataKey="R_max" stroke="none" fill={C.red} fillOpacity={0.1} animationDuration={300} /><Line type="monotone" dataKey="R_mean" stroke={C.red} strokeWidth={1} dot={false} animationDuration={300} /></>}
+        {channels.G && <><Area type="monotone" dataKey="G_max" stroke="none" fill={C.green} fillOpacity={0.1} animationDuration={300} /><Line type="monotone" dataKey="G_mean" stroke={C.green} strokeWidth={1} dot={false} animationDuration={300} /></>}
+        {channels.B && <><Area type="monotone" dataKey="B_max" stroke="none" fill={C.blue} fillOpacity={0.1} animationDuration={300} /><Line type="monotone" dataKey="B_mean" stroke={C.blue} strokeWidth={1} dot={false} animationDuration={300} /></>}
+        {refAreaLeft != null && refAreaRight != null && (
+          <ReferenceArea x1={refAreaLeft} x2={refAreaRight} strokeOpacity={0.3} fill="#FFF" fillOpacity={0.05} />
+        )}
+      </AreaChart>
+    </ResponsiveContainer>
+  )
+
   return (
-    <Box sx={{ position: 'relative' }}>
-      <ResponsiveContainer width="100%" height={height}>
-        <AreaChart data={chartData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}
-          onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp}
-        >
-          <CartesianGrid strokeDasharray="3 3" stroke="#1A1A1A" />
-          <XAxis dataKey="pos" domain={xDomain ?? ['dataMin', 'dataMax']} tick={{ fill: '#555', fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#222' }} type="number" allowDataOverflow />
-          <YAxis domain={yDomain} tick={{ fill: '#555', fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#222' }} allowDataOverflow />
-          <Tooltip contentStyle={{ backgroundColor: '#1A1A1A', border: '1px solid #333', borderRadius: 4, fontSize: 10, padding: '4px 8px' }} labelStyle={{ color: '#888' }} />
-          {channels.R && <><Area type="monotone" dataKey="R_max" stroke="none" fill={C.red} fillOpacity={0.1} animationDuration={300} /><Line type="monotone" dataKey="R_mean" stroke={C.red} strokeWidth={1} dot={false} animationDuration={300} /></>}
-          {channels.G && <><Area type="monotone" dataKey="G_max" stroke="none" fill={C.green} fillOpacity={0.1} animationDuration={300} /><Line type="monotone" dataKey="G_mean" stroke={C.green} strokeWidth={1} dot={false} animationDuration={300} /></>}
-          {channels.B && <><Area type="monotone" dataKey="B_max" stroke="none" fill={C.blue} fillOpacity={0.1} animationDuration={300} /><Line type="monotone" dataKey="B_mean" stroke={C.blue} strokeWidth={1} dot={false} animationDuration={300} /></>}
-          {refAreaLeft != null && refAreaRight != null && (
-            <ReferenceArea x1={refAreaLeft} x2={refAreaRight} strokeOpacity={0.3} fill="#FFF" fillOpacity={0.05} />
-          )}
-        </AreaChart>
-      </ResponsiveContainer>
+    <Box sx={{ position: 'relative', ...(fill ? { flex: 1, minHeight: 0 } : {}) }}>
+      {fill ? <Box sx={{ position: 'absolute', inset: 0 }}>{chart}</Box> : chart}
       {xDomain && (
         <Button size="small" onClick={resetZoom}
-          sx={{ position: 'absolute', top: 2, right: 8, fontSize: 9, color: C.yellow, minWidth: 'auto', px: 0.5, py: 0 }}>
+          sx={{ position: 'absolute', top: 2, right: 8, fontSize: 9, color: C.yellow, minWidth: 'auto', px: 0.5, py: 0, zIndex: 1 }}>
           Reset Zoom
         </Button>
       )}
@@ -254,27 +260,33 @@ function ZoomableHistogramChart({ data, channels, height = 160 }: { data: Analys
 
   const resetZoom = () => { setXDomain(null); setYDomain(['auto', 'auto']) }
 
+  const fill = height === '100%'
+
+  const chart = (
+    <ResponsiveContainer width="100%" height={fill ? '100%' : height}>
+      <AreaChart data={chartData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}
+        onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp}
+      >
+        <CartesianGrid strokeDasharray="3 3" stroke="#1A1A1A" />
+        <XAxis dataKey="value" domain={xDomain ?? ['dataMin', 'dataMax']} tick={{ fill: '#555', fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#222' }} type="number" allowDataOverflow />
+        <YAxis domain={yDomain as any} tick={{ fill: '#555', fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#222' }} allowDataOverflow />
+        <Tooltip contentStyle={{ backgroundColor: '#1A1A1A', border: '1px solid #333', borderRadius: 4, fontSize: 10, padding: '4px 8px' }} labelStyle={{ color: '#888' }} />
+        {channels.R && <Area type="monotone" dataKey="R" stroke={C.red} fill={C.red} fillOpacity={0.2} strokeWidth={1} dot={false} animationDuration={300} />}
+        {channels.G && <Area type="monotone" dataKey="G" stroke={C.green} fill={C.green} fillOpacity={0.2} strokeWidth={1} dot={false} animationDuration={300} />}
+        {channels.B && <Area type="monotone" dataKey="B" stroke={C.blue} fill={C.blue} fillOpacity={0.2} strokeWidth={1} dot={false} animationDuration={300} />}
+        {refAreaLeft != null && refAreaRight != null && (
+          <ReferenceArea x1={refAreaLeft} x2={refAreaRight} strokeOpacity={0.3} fill="#FFF" fillOpacity={0.05} />
+        )}
+      </AreaChart>
+    </ResponsiveContainer>
+  )
+
   return (
-    <Box sx={{ position: 'relative' }}>
-      <ResponsiveContainer width="100%" height={height}>
-        <AreaChart data={chartData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}
-          onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp}
-        >
-          <CartesianGrid strokeDasharray="3 3" stroke="#1A1A1A" />
-          <XAxis dataKey="value" domain={xDomain ?? ['dataMin', 'dataMax']} tick={{ fill: '#555', fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#222' }} type="number" allowDataOverflow />
-          <YAxis domain={yDomain as any} tick={{ fill: '#555', fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#222' }} allowDataOverflow />
-          <Tooltip contentStyle={{ backgroundColor: '#1A1A1A', border: '1px solid #333', borderRadius: 4, fontSize: 10, padding: '4px 8px' }} labelStyle={{ color: '#888' }} />
-          {channels.R && <Area type="monotone" dataKey="R" stroke={C.red} fill={C.red} fillOpacity={0.2} strokeWidth={1} dot={false} animationDuration={300} />}
-          {channels.G && <Area type="monotone" dataKey="G" stroke={C.green} fill={C.green} fillOpacity={0.2} strokeWidth={1} dot={false} animationDuration={300} />}
-          {channels.B && <Area type="monotone" dataKey="B" stroke={C.blue} fill={C.blue} fillOpacity={0.2} strokeWidth={1} dot={false} animationDuration={300} />}
-          {refAreaLeft != null && refAreaRight != null && (
-            <ReferenceArea x1={refAreaLeft} x2={refAreaRight} strokeOpacity={0.3} fill="#FFF" fillOpacity={0.05} />
-          )}
-        </AreaChart>
-      </ResponsiveContainer>
+    <Box sx={{ position: 'relative', ...(fill ? { flex: 1, minHeight: 0 } : {}) }}>
+      {fill ? <Box sx={{ position: 'absolute', inset: 0 }}>{chart}</Box> : chart}
       {xDomain && (
         <Button size="small" onClick={resetZoom}
-          sx={{ position: 'absolute', top: 2, right: 8, fontSize: 9, color: C.yellow, minWidth: 'auto', px: 0.5, py: 0 }}>
+          sx={{ position: 'absolute', top: 2, right: 8, fontSize: 9, color: C.yellow, minWidth: 'auto', px: 0.5, py: 0, zIndex: 1 }}>
           Reset Zoom
         </Button>
       )}
@@ -729,12 +741,20 @@ export default function Analyzer() {
         <Button variant="contained" size="small" component="label" startIcon={<MovieIcon />} sx={{ fontWeight: 700, fontSize: 11, px: 2 }}>
           Open Image/Video<input type="file" hidden accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp,.mov,.mp4,.avi,.mkv,.mxf,.webm,.m4v,.mpg,.mpeg" onChange={handleFile} />
         </Button>
-        <Button variant="outlined" size="small" startIcon={<CompareIcon />}
-          disabled={!result || compareLoading}
-          onClick={handleCompare}
-          sx={{ fontWeight: 700, fontSize: 11, px: 2 }}>
-          {compareLoading ? 'Loading…' : 'Compare'}
-        </Button>
+        {compareResult ? (
+          <Button variant="outlined" size="small" startIcon={<CompareIcon />}
+            onClick={() => setComparing(true)}
+            sx={{ fontWeight: 700, fontSize: 11, px: 2, borderColor: C.green, color: C.green }}>
+            View Compare
+          </Button>
+        ) : (
+          <Button variant="outlined" size="small" startIcon={<CompareIcon />}
+            disabled={!result || compareLoading}
+            onClick={handleCompare}
+            sx={{ fontWeight: 700, fontSize: 11, px: 2 }}>
+            {compareLoading ? 'Loading…' : 'Compare'}
+          </Button>
+        )}
         <Button variant="outlined" size="small" startIcon={<SaveAltIcon />}
           disabled={!result}
           onClick={handleExport}
@@ -742,6 +762,7 @@ export default function Analyzer() {
           Export frame…
         </Button>
         {file && <Chip label={file.name} size="small" onDelete={() => { setFile(null); setResult(null); setCompareResult(null); setComparing(false) }} />}
+        {compareResult && <Chip label={`vs ${compareResult.filename}`} size="small" sx={{ bgcolor: '#1A2A1A', color: C.green, '& .MuiChip-deleteIcon': { color: C.green } }} onDelete={() => { setCompareResult(null); setComparing(false) }} />}
       </Stack>
 
       {loading && (
@@ -790,15 +811,15 @@ export default function Analyzer() {
 
       {/* Fullscreen Dialog */}
       <Dialog open={!!fullscreenSection} onClose={() => setFullscreenSection(null)} maxWidth={false}
-        PaperProps={{ sx: { bgcolor: '#0D0D0D', width: '90vw', height: '85vh', maxWidth: '90vw', borderRadius: 2 } }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', px: 2, py: 1, borderBottom: '1px solid #222', bgcolor: '#0A0A0A' }}>
+        PaperProps={{ sx: { bgcolor: '#0D0D0D', width: '90vw', height: '85vh', maxWidth: '90vw', borderRadius: 2, display: 'flex', flexDirection: 'column' } }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', px: 2, py: 1, borderBottom: '1px solid #222', bgcolor: '#0A0A0A', flexShrink: 0 }}>
           <Typography sx={{ fontWeight: 700, letterSpacing: 1.5, color: C.dim, fontSize: 11 }}>
             {fullscreenSection ? sectionTitles[fullscreenSection] ?? '' : ''}
           </Typography>
           <IconButton onClick={() => setFullscreenSection(null)} sx={{ color: '#888' }}><CloseIcon /></IconButton>
         </Box>
-        <DialogContent sx={{ bgcolor: '#111', p: 2, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
-          <Box sx={{ flex: 1, minHeight: 0 }}>
+        <DialogContent sx={{ bgcolor: '#111', p: 2, flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
             {fullscreenSection && buildSectionContent(fullscreenSection, true)}
           </Box>
         </DialogContent>
@@ -806,7 +827,7 @@ export default function Analyzer() {
 
       {/* Compare Overlay */}
       {comparing && result && compareResult && (
-        <CompareView a={result} b={compareResult} onClose={() => { setComparing(false); setCompareResult(null) }} />
+        <CompareView a={result} b={compareResult} onClose={() => setComparing(false)} />
       )}
     </Box>
   )
